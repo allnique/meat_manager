@@ -1,0 +1,1423 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>원육 매니저 V4.23 (Final Fix)</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- SheetJS (Excel) -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+
+  <style>
+    .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+    .no-scrollbar::-webkit-scrollbar { display:none; }
+    .no-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
+    body { -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
+    
+    @keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .animate-slide-up { animation: slideUp 0.3s ease-out forwards; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .animate-fade-in { animation: fadeIn 0.2s ease-out forwards; }
+  </style>
+</head>
+
+<body class="bg-slate-50 select-none text-slate-800">
+  <div id="root"></div>
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import {
+      getFirestore,
+      collection, addDoc, onSnapshot, serverTimestamp,
+      deleteDoc, doc, setDoc, writeBatch, updateDoc, query, where, getDocs, orderBy, limit, arrayUnion
+    } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+      apiKey: "AIzaSyAQhyDDZYmYpX4_F7xU6Batsv1AHSBQeH4",
+      authDomain: "meat-manager-v1.firebaseapp.com",
+      projectId: "meat-manager-v1",
+      storageBucket: "meat-manager-v1.firebasestorage.app",
+      messagingSenderId: "990988776534",
+      appId: "1:990988776534:web:6f89cee179c54ec91a77f7"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    window.__fb = {
+      auth, db,
+      signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+      collection, addDoc, onSnapshot, serverTimestamp,
+      deleteDoc, doc, setDoc, writeBatch, updateDoc,
+      query, where, getDocs, orderBy, limit, arrayUnion
+    };
+  </script>
+
+  <!-- React Application -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // --- Helpers ---
+    function getTodayString() {
+      // KST 한국 시간 강제 적용
+      const now = new Date();
+      const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+      const kstGap = 9 * 60 * 60 * 1000; 
+      const d = new Date(utc + kstGap);
+
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    // 날짜 안전 변환 헬퍼 (데이터 없을 시 타임스탬프 활용)
+    function getSafeDate(item, field) {
+        if (item[field]) return item[field].substring(0, 10);
+        // fallback: processDate -> timestamp
+        if (item.processDate) return item.processDate.substring(0, 10);
+        if (item.timestamp) {
+            const d = new Date(item.timestamp.seconds * 1000);
+            const year = d.getFullYear();
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+        return getTodayString(); // 최후의 수단
+    }
+
+    function cleanPayload(obj) {
+      const newObj = {};
+      Object.keys(obj).forEach(key => {
+        if (obj[key] !== undefined && obj[key] !== null && key !== 'id') {
+          newObj[key] = obj[key];
+        }
+      });
+      return newObj;
+    }
+
+    const DEFAULT_MASTER_DATA = {
+      locations: ['냉장 A창고', '냉장 B창고', '냉동 1창고', '냉동 2창고', '매장 쇼케이스', '작업장 해동고'],
+      grades: ['1++', '1+', '1등급', '2등급', '3등급', '등외', 'Prime', 'Choice', 'S', 'A'],
+      origins: ['국내산', '미국산', '호주산', '캐나다산'],
+      brands: ['횡성축협', '도드람', 'Teys', 'JBS', 'AMH', 'Excel', 'Swift', 'IBP', 'Kilcoy', 'Oakey'],
+      factories: ['101', '102', '201', '305', '423', '239', '4'],
+      productNames: ['한우 등심', '한우 안심', '한돈 삼겹살', '부채살(Oyster Blade)', '등심(Cube Roll)', '우둔(Topside)', '갈비본살'],
+      storageTypes: ['냉장', '냉동', '급속냉동'],
+      returnDestinations: ['본사 반품', '폐기', '단순 반송', '업체 교환'],
+      suppliers: ['구구축산', '대한유통', '해피미트', '미트박스', '직수입']
+    };
+
+    const BRAND_ORIGIN_MAP = {
+        'TEYS': '호주산', 'AMH': '호주산', 'KILCOY': '호주산', 'OAKEY': '호주산', 'WMPG': '호주산',
+        'SWIFT': '미국산', 'EXCEL': '미국산', 'IBP': '미국산', 'NATIONAL': '미국산', 'SHOWCASE': '미국산', 'AURORA': '미국산',
+        '횡성축협': '국내산', '도드람': '국내산', '목우촌': '국내산', '한돈': '국내산', '하이포크': '국내산'
+    };
+
+    // --- Gemini API ---
+    const apiKey = "AIzaSyD402NoYGXoE_UTMkjbaLJJj09a-88_gno"; 
+    const AI_MODEL = "gemini-2.5-flash";
+
+    async function callGeminiVision(base64Image) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL}:generateContent?key=${apiKey}`;
+      const payload = {
+        contents: [{
+          role: "user",
+          parts: [
+            { text: "Analyze this meat label image. Identify: Product Name, Weight(kg), Packing Date(YYYY-MM-DD), Origin, Grade, Factory Number, Brand, Supplier, Lot Number, Barcode(numeric). Return ONLY a valid JSON object with keys: productName, weight, packingDate, origin, grade, factoryNo, brand, supplier, lotNumber, barcode. Do not include markdown formatting." },
+            { inlineData: { mimeType: "image/jpeg", data: base64Image } } 
+          ]
+        }],
+        generationConfig: { response_mime_type: "application/json" } 
+      };
+
+      try {
+        const res = await fetch(url, { 
+          method:"POST", 
+          headers:{ "Content-Type":"application/json" }, 
+          body: JSON.stringify(payload) 
+        });
+        
+        const data = await res.json();
+        if(data.error) throw new Error(data.error.message);
+        
+        let text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error("분석 결과가 없습니다.");
+        
+        const jsonStart = text.indexOf('{');
+        const jsonEnd = text.lastIndexOf('}');
+        if (jsonStart === -1 || jsonEnd === -1) throw new Error("JSON 파싱 실패");
+        
+        const jsonStr = text.substring(jsonStart, jsonEnd + 1);
+        const parsed = JSON.parse(jsonStr);
+        
+        if(parsed.weight) parsed.weight = parseFloat(String(parsed.weight).replace(/[^0-9.]/g, ''));
+        return parsed;
+
+      } catch (e) { 
+        console.error("Vision Error:", e); 
+        return { error: e.message }; 
+      }
+    }
+
+    async function callGeminiText(prompt) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL}:generateContent?key=${apiKey}`;
+      try {
+        const res = await fetch(url, { 
+          method:"POST", 
+          headers:{ "Content-Type":"application/json" }, 
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) 
+        });
+        const data = await res.json();
+        if(data.error) return "오류: " + data.error.message;
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text || "분석 실패";
+      } catch (e) { return "오류: " + e.message; }
+    }
+
+    // --- Components ---
+
+    function PromptModal({ title, initialValue, onSave, onClose }) {
+      const [value, setValue] = useState(initialValue || "");
+      return (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4 animate-fade-in backdrop-blur-sm">
+          <div className="bg-white w-full max-w-xs rounded-2xl p-5 shadow-2xl animate-slide-up">
+            <h3 className="font-bold text-lg mb-3 text-slate-800">{title}</h3>
+            <input 
+              autoFocus
+              className="w-full bg-slate-100 border border-slate-200 rounded-xl px-4 py-3 font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-500 mb-4"
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              onKeyDown={e => { if(e.key === 'Enter') onSave(value); }}
+            />
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-500">취소</button>
+              <button onClick={() => onSave(value)} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-indigo-200">확인</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function BarChart({ data, title, color="indigo" }) {
+      if (!data || data.length === 0) return <div className="h-40 flex items-center justify-center text-slate-400 text-xs bg-white rounded-xl border">데이터 없음</div>;
+      const maxVal = Math.max(...data.map(d => d.value)) || 1;
+      const colors = { indigo: "bg-indigo-500", green: "bg-emerald-500", orange: "bg-orange-500", blue: "bg-blue-500" };
+      
+      return (
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+          <h3 className="text-sm font-bold text-slate-600 mb-4">{title}</h3>
+          <div className="h-40 flex items-end justify-between gap-2 px-2">
+            {data.map((d, i) => (
+              <div key={i} className="flex-1 flex flex-col items-center gap-1 group relative h-full justify-end">
+                <div className={`w-full rounded-t-md transition-all relative flex justify-center group-hover:scale-105 ${colors[color]}`}
+                  style={{ height: `${(d.value / maxVal) * 80}%`, minHeight: '4px' }}>
+                   <span className="absolute -top-5 text-[10px] font-bold text-slate-600">{d.value.toFixed(2)}</span>
+                </div>
+                <div className="text-[10px] text-slate-500 font-bold truncate w-full text-center border-t border-slate-100 pt-1">{d.name}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- Main App ---
+    function MeatWMS_Pro_V4_5() {
+      const [user, setUser] = useState(null);
+      const [activeTab, setActiveTab] = useState("SCAN");
+      const [masterData, setMasterData] = useState(DEFAULT_MASTER_DATA);
+      
+      const [globalSettings, setGlobalSettings] = useState({
+        location: "", grade: "", brand: "", origin: "", 
+        factoryNo: "", storageType: "냉장", productName: "", 
+        supplier: "", unitPrice: "",
+        packingDate: getTodayString(),
+        returnDestination: ""
+      });
+      
+      const [inventory, setInventory] = useState([]);
+
+      useEffect(() => {
+        const boot = async () => {
+          if (!window.__fb?.auth) return;
+          const { auth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } = window.__fb;
+          try {
+             if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+             else await signInAnonymously(auth);
+            onAuthStateChanged(auth, setUser);
+          } catch(e) { try { await signInAnonymously(auth); } catch(e2) {} }
+        };
+        boot();
+      }, []);
+
+      useEffect(() => {
+        if (!user) return;
+        const { db, doc, onSnapshot, setDoc, collection } = window.__fb;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        const configRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data");
+        const unsubConfig = onSnapshot(configRef, (snap) => {
+          if (snap.exists()) {
+             const data = snap.data();
+             setMasterData(prev => ({ ...prev, ...data }));
+             setGlobalSettings(prev => ({
+               ...prev,
+               location: prev.location || data.locations?.[0] || "",
+               grade: prev.grade || data.grades?.[0] || "",
+               brand: prev.brand || data.brands?.[0] || "",
+               origin: prev.origin || data.origins?.[0] || "",
+               supplier: prev.supplier || data.suppliers?.[0] || "",
+               returnDestination: prev.returnDestination || data.returnDestinations?.[0] || ""
+             }));
+          } else {
+             setDoc(configRef, DEFAULT_MASTER_DATA);
+          }
+        });
+
+        const logsRef = collection(db, "artifacts", appId, "public", "data", "meat_wms_logs");
+        const unsubLogs = onSnapshot(logsRef, (snapshot) => {
+          const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+          // 기본 정렬: 입력 최신순
+          setInventory(items.sort((a,b) => (b.clientTimestamp || "").localeCompare(a.clientTimestamp || "")));
+        });
+
+        return () => { unsubConfig(); unsubLogs(); };
+      }, [user]);
+
+      return (
+        <div className="min-h-screen bg-slate-100 font-sans text-slate-900 pb-20 flex flex-col">
+          <header className="bg-white border-b border-slate-200 px-4 py-3 flex flex-col gap-2 sticky top-0 z-20 shadow-sm safe-top">
+            <div className="flex items-center justify-between">
+               <div className="flex items-center gap-2">
+                  <div className="bg-indigo-600 p-1.5 rounded-lg shadow-sm">
+                     <span className="text-white text-xs font-black">V4.23</span>
+                  </div>
+                  <h1 className="font-bold text-lg text-slate-800 tracking-tight">원육 매니저</h1>
+               </div>
+            </div>
+            
+            {/* 작업일 설정: SCAN 탭에서만 보임 */}
+            {activeTab === "SCAN" && (
+                <div className="flex items-center gap-1 bg-slate-100 rounded-lg px-2 py-1 animate-fade-in self-start">
+                  <span className="text-[10px] text-slate-400 font-bold">작업일</span>
+                  <input type="date" value={globalSettings.packingDate} 
+                    onChange={e => setGlobalSettings({...globalSettings, packingDate: e.target.value})}
+                    className="bg-transparent text-xs font-bold outline-none w-24 text-right" />
+                  <button onClick={() => setGlobalSettings({...globalSettings, packingDate: getTodayString()})} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-bold text-slate-500 hover:bg-slate-50">오늘</button>
+                </div>
+            )}
+          </header>
+
+          <main className="flex-1 overflow-y-auto overflow-x-hidden">
+            {activeTab === "SCAN" && (
+              <ScanScreen 
+                user={user} 
+                masterData={masterData} 
+                globalSettings={globalSettings} 
+                setGlobalSettings={setGlobalSettings}
+                inventory={inventory} 
+              />
+            )}
+            {activeTab === "HISTORY" && <HistoryScreen user={user} inventory={inventory} masterData={masterData} />}
+            {activeTab === "STATS" && <StatsScreen inventory={inventory} />}
+            {activeTab === "SETTINGS" && <SettingsScreen user={user} masterData={masterData} setMasterData={setMasterData} />}
+          </main>
+
+          <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 pb-safe pt-1 px-2 flex justify-around items-center z-30 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+            <NavButton label="입고/이동" icon="📦" active={activeTab==="SCAN"} onClick={() => setActiveTab("SCAN")} />
+            <NavButton label="이력/재고" icon="📝" active={activeTab==="HISTORY"} onClick={() => setActiveTab("HISTORY")} />
+            <NavButton label="통계" icon="📈" active={activeTab==="STATS"} onClick={() => setActiveTab("STATS")} />
+            <NavButton label="설정" icon="⚙️" active={activeTab==="SETTINGS"} onClick={() => setActiveTab("SETTINGS")} />
+          </nav>
+        </div>
+      );
+    }
+
+    // --- 1. Scan Screen ---
+    function ScanScreen({ user, masterData, globalSettings, setGlobalSettings, inventory }) {
+      const [inputBarcode, setInputBarcode] = useState("");
+      const [mode, setMode] = useState("INBOUND"); 
+      const [isContinuous, setIsContinuous] = useState(true);
+      const [lastLog, setLastLog] = useState(null);
+      const [feedback, setFeedback] = useState(null);
+      const [isAnalyzing, setIsAnalyzing] = useState(false);
+      const [isModalOpen, setIsModalOpen] = useState(false);
+      const [modalData, setModalData] = useState({});
+      const inputRef = useRef(null);
+      const fileInputRef = useRef(null);
+
+      const commitTransaction = async (data) => {
+        if (!user) return;
+        const { db, addDoc, collection, serverTimestamp, updateDoc, doc, arrayUnion } = window.__fb;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        try {
+          const safeData = cleanPayload(data);
+          const currentWorkDate = globalSettings.packingDate;
+
+          if (mode === "INBOUND") {
+             const duplicate = inventory.find(i => 
+                i.status === "ACTIVE" && i.barcode === safeData.barcode && i.transactionType !== "RETURN"
+             );
+             if(duplicate && !safeData.id) { 
+                setFeedback({ type: "error", msg: "🚨 이미 등록된 바코드입니다!" });
+                setTimeout(() => setFeedback(null), 3000);
+                return;
+             }
+             
+             await addDoc(collection(db, "artifacts", appId, "public", "data", "meat_wms_logs"), {
+               ...safeData,
+               status: "ACTIVE", 
+               initialType: "INBOUND", 
+               history: [{ type: "INBOUND", date: new Date().toISOString(), workDate: currentWorkDate }],
+               clientTimestamp: new Date().toISOString(),
+               processDate: currentWorkDate,
+               inboundDate: currentWorkDate, // Inbound Date Fixed
+               timestamp: serverTimestamp()
+             });
+             setLastLog(safeData);
+             setFeedback({ type: "success", msg: "입고 등록" });
+
+          } else if (mode === "MOVE") {
+             let target = safeData.id ? inventory.find(i => i.id === safeData.id) : inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode);
+
+             if (target) {
+               await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", target.id), {
+                 location: safeData.location,
+                 transactionType: "MOVE", 
+                 lastMovedAt: new Date().toISOString(),
+                 processDate: currentWorkDate,
+                 moveDate: currentWorkDate,
+                 history: arrayUnion({ type: "MOVE", date: new Date().toISOString(), workDate: currentWorkDate, from: target.location, to: safeData.location })
+               });
+               setLastLog({ ...target, location: safeData.location, transactionType: "MOVE", prevLoc: target.location });
+               setFeedback({ type: "success", msg: "이동 완료" });
+             } else {
+               setFeedback({ type: "error", msg: "재고 없음" });
+               setTimeout(() => setFeedback(null), 3000);
+               return; 
+             }
+
+          } else if (mode === "RETURN") {
+             let target = safeData.id ? inventory.find(i => i.id === safeData.id) : inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode);
+
+             if (target) {
+                await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", target.id), {
+                   location: safeData.location, 
+                   status: "RETURNED",
+                   transactionType: "RETURN",
+                   returnedAt: new Date().toISOString(),
+                   processDate: currentWorkDate, 
+                   returnDate: currentWorkDate,
+                   history: arrayUnion({ type: "RETURN", date: new Date().toISOString(), workDate: currentWorkDate, from: target.location })
+                });
+                setLastLog({ ...target, location: safeData.location, transactionType: "RETURN" });
+                setFeedback({ type: "success", msg: "반품 처리" });
+             } else {
+                setFeedback({ type: "error", msg: "재고 없음" });
+                setTimeout(() => setFeedback(null), 3000);
+                return;
+             }
+          }
+          setTimeout(() => setFeedback(null), 1500);
+        } catch(e) { console.error(e); setFeedback({type:"error", msg: "오류: " + e.message}); }
+      };
+      
+      const parseBarcode = (raw) => {
+        let code = raw.replace(/[()]/g,"");
+        let res = { gtin:"", weight:0, date:null, lot:"", origin:"" };
+        
+        if (code.startsWith("01")) { 
+            res.gtin = code.substr(2,14); code = code.substr(16); 
+        } else if (code.length >= 14 && (code.startsWith("9") || code.startsWith("1") || code.startsWith("0"))) {
+             res.gtin = code.substr(0,14); code = code.substr(14);
+        }
+
+        if (res.gtin) {
+            const prefix = parseInt(res.gtin.substr(0, 3));
+            if (prefix === 880) res.origin = "국내산";
+            else if (res.gtin.startsWith("9")) res.origin = "호주산";
+            else if (prefix >= 0 && prefix <= 139) res.origin = "미국산";
+        }
+        
+        let wIdx = code.indexOf("3102");
+        if (wIdx > -1) { 
+            let wStr = code.substr(wIdx+4, 6);
+            if(wStr.length === 6 && !isNaN(wStr)) res.weight = parseFloat(wStr) / 100;
+        }
+        
+        const dateAIs = ["13", "15", "11"];
+        for(let ai of dateAIs) {
+            let idx = code.indexOf(ai);
+            if(idx > -1 && idx + 2 + 6 <= code.length) {
+                let dStr = code.substr(idx+2, 6);
+                let y = parseInt(dStr.substr(0,2));
+                if (y >= 20 && y <= 30) {
+                    res.date = `20${dStr.substr(0,2)}-${dStr.substr(2,2)}-${dStr.substr(4,2)}`;
+                    break; 
+                }
+            }
+        }
+        let lotIdx = code.indexOf("21"); 
+        if (lotIdx === -1) lotIdx = code.indexOf("10"); 
+        if (lotIdx > -1) res.lot = code.substr(lotIdx+2, 12); 
+
+        return res;
+      };
+
+      const handleScan = async (e) => {
+        e?.preventDefault();
+        if (!inputBarcode.trim()) return;
+        const code = inputBarcode.trim();
+        setInputBarcode("");
+        const parsed = parseBarcode(code);
+        
+        let foundStock = inventory.find(i => i.barcode === code && i.status === "ACTIVE");
+        const finalData = {
+          barcode: code,
+          gtin: parsed.gtin,
+          productName: foundStock?.productName || globalSettings.productName || "",
+          brand: foundStock?.brand || globalSettings.brand,
+          origin: parsed.origin || foundStock?.origin || globalSettings.origin,
+          storageType: foundStock?.storageType || globalSettings.storageType,
+          grade: foundStock?.grade || globalSettings.grade,
+          factoryNo: foundStock?.factoryNo || globalSettings.factoryNo, 
+          supplier: foundStock?.supplier || globalSettings.supplier,
+          unitPrice: foundStock?.unitPrice || globalSettings.unitPrice,
+          location: mode === "MOVE" ? globalSettings.location : (mode === "RETURN" ? globalSettings.returnDestination : globalSettings.location),
+          weight: parsed.weight || foundStock?.weight || 0,
+          packingDate: parsed.date || foundStock?.packingDate || globalSettings.packingDate,
+          lotNumber: parsed.lot || foundStock?.lotNumber || "",
+          transactionType: mode,
+          userNote: foundStock?.userNote || ""
+        };
+
+        if (mode === "INBOUND" && !finalData.productName && isContinuous) {
+           setModalData(finalData); setIsModalOpen(true); return;
+        }
+
+        if (isContinuous && finalData.weight > 0 && finalData.productName) {
+           await commitTransaction(finalData);
+        } else {
+           setModalData(finalData); setIsModalOpen(true);
+        }
+        inputRef.current?.focus();
+      };
+
+      return (
+        <div className="flex flex-col h-full relative">
+          {feedback && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
+              <div className={`px-8 py-6 rounded-3xl shadow-2xl backdrop-blur-md flex flex-col items-center animate-slide-up ${feedback.type==="error"?"bg-red-500/90":"bg-slate-900/90"} text-white`}>
+                <span className="text-4xl mb-2">{feedback.type==="success" ? "✅" : "🚨"}</span>
+                <p className="text-xl font-bold">{feedback.msg}</p>
+              </div>
+            </div>
+          )}
+
+          <div className={`p-4 transition-colors duration-300 ${mode==="RETURN"?"bg-orange-50":mode==="MOVE"?"bg-blue-50":"bg-white"}`}>
+            <div className="flex gap-1 mb-4 bg-slate-100 p-1 rounded-xl">
+              <ModeBtn label="입고" active={mode==="INBOUND"} onClick={()=>setMode("INBOUND")} color="indigo" />
+              <ModeBtn label="이동" active={mode==="MOVE"} onClick={()=>setMode("MOVE")} color="blue" />
+              <ModeBtn label="반품" active={mode==="RETURN"} onClick={()=>setMode("RETURN")} color="orange" />
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+               <div className="flex justify-between items-center mb-3">
+                 <div className="flex items-center gap-2">
+                   <div className={`w-2.5 h-2.5 rounded-full ${isContinuous ? "bg-green-500 animate-pulse" : "bg-slate-300"}`}></div>
+                   <span className="text-xs font-bold text-slate-500">연속 스캔 모드</span>
+                 </div>
+                 <Toggle checked={isContinuous} onChange={setIsContinuous} />
+               </div>
+               
+               <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                 {mode === "MOVE" ? (
+                   <SelectChip label="🎯 이동위치(목표)" value={globalSettings.location} options={masterData.locations} onChange={v=>setGlobalSettings({...globalSettings, location:v})} highlight />
+                 ) : mode === "RETURN" ? (
+                   <SelectChip label="🔙 반품처" value={globalSettings.returnDestination} options={masterData.returnDestinations} onChange={v=>setGlobalSettings({...globalSettings, returnDestination:v})} highlightRed />
+                 ) : (
+                   <>
+                     <SelectChip label="위치" value={globalSettings.location} options={masterData.locations} onChange={v=>setGlobalSettings({...globalSettings, location:v})} />
+                     <SelectChip label="부위" value={globalSettings.productName} options={masterData.productNames} onChange={v=>setGlobalSettings({...globalSettings, productName:v})} />
+                     <SelectChip label="원산지" value={globalSettings.origin} options={masterData.origins} onChange={v=>setGlobalSettings({...globalSettings, origin:v})} />
+                     <SelectChip label="거래처" value={globalSettings.supplier} options={masterData.suppliers} onChange={v=>setGlobalSettings({...globalSettings, supplier:v})} />
+                     <SelectChip label="등급" value={globalSettings.grade} options={masterData.grades} onChange={v=>setGlobalSettings({...globalSettings, grade:v})} />
+                     <SelectChip label="브랜드" value={globalSettings.brand} options={masterData.brands} onChange={v=>setGlobalSettings({...globalSettings, brand:v})} />
+                     <SelectChip label="공장" value={globalSettings.factoryNo} options={masterData.factories} onChange={v=>setGlobalSettings({...globalSettings, factoryNo:v})} />
+                   </>
+                 )}
+               </div>
+               {mode === "INBOUND" && (
+                 <div className="mt-2 flex items-center gap-2 bg-slate-50 p-2 rounded-lg">
+                    <span className="text-xs font-bold text-slate-500">단가(kg)</span>
+                    <input type="number" placeholder="0" value={globalSettings.unitPrice} 
+                       onChange={e=>setGlobalSettings({...globalSettings, unitPrice:e.target.value})}
+                       className="bg-transparent font-bold text-sm outline-none flex-1" />
+                    <span className="text-xs text-slate-400">원</span>
+                 </div>
+               )}
+            </div>
+          </div>
+
+          <div className="px-4 py-2 sticky top-0 z-10 flex gap-2 items-stretch">
+            <form onSubmit={handleScan} className="flex-1 relative">
+              <textarea 
+                ref={inputRef}
+                value={inputBarcode} 
+                onChange={e=>setInputBarcode(e.target.value)}
+                onKeyDown={(e) => {
+                   if(e.key === 'Enter') {
+                      e.preventDefault(); 
+                      handleScan(e);
+                   }
+                }}
+                className={`w-full py-3 pl-4 pr-4 rounded-xl border-2 shadow-sm text-lg font-bold outline-none transition-all resize-none
+                  ${mode==="RETURN" ? "border-orange-200 focus:border-orange-500" : mode==="MOVE" ? "border-blue-200 focus:border-blue-500" : "border-indigo-200 focus:border-indigo-500"}`}
+                style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
+                placeholder={mode==="MOVE" ? "이동할 상품 스캔" : mode==="RETURN" ? "반품할 상품 스캔" : "신규 입고 스캔"}
+                autoFocus 
+                inputMode="none" 
+                rows={2}
+              />
+            </form>
+            <button onClick={()=>fileInputRef.current?.click()} 
+              className="bg-slate-800 text-white w-20 rounded-xl shadow-lg flex flex-col items-center justify-center hover:bg-slate-700 active:scale-95 transition-all">
+              <span className="text-xl">📸</span>
+              <span className="text-[10px] font-black text-indigo-300">AI</span>
+              <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={async (e) => {
+                 const file = e.target.files?.[0];
+                 if(file) {
+                    setIsAnalyzing(true);
+                    const reader = new FileReader();
+                    reader.readAsDataURL(file);
+                    reader.onloadend = async () => {
+                        const res = await callGeminiVision(String(reader.result).split(",")[1]);
+                        setIsAnalyzing(false);
+                        if(res && !res.error) {
+                           const match = inventory.find(i => 
+                               i.status === "ACTIVE" && 
+                               ( (res.lotNumber && i.lotNumber === res.lotNumber) || (res.barcode && i.barcode === res.barcode) )
+                           );
+                           let finalOrigin = res.origin;
+                           if (res.barcode) {
+                               const bc = parseBarcode(res.barcode);
+                               if (bc.origin) finalOrigin = bc.origin;
+                           }
+                           if (!finalOrigin && res.brand) {
+                               const upperBrand = res.brand.toUpperCase();
+                               const mappedKey = Object.keys(BRAND_ORIGIN_MAP).find(k => upperBrand.includes(k));
+                               if (mappedKey) finalOrigin = BRAND_ORIGIN_MAP[mappedKey];
+                           }
+
+                           if (match) {
+                               if (mode === "INBOUND") {
+                                   setFeedback({ type: "error", msg: "🚨 이미 등록된 상품입니다." });
+                                   setTimeout(() => setFeedback(null), 3000);
+                                   setModalData({ ...match, transactionType: mode }); 
+                               } else {
+                                   setModalData({ ...match, ...res, transactionType: mode });
+                               }
+                           } else {
+                               setModalData({ ...globalSettings, ...res, origin: finalOrigin || globalSettings.origin, transactionType: mode }); 
+                           }
+                           setIsModalOpen(true); 
+                        } else if(res && res.error) {
+                           setFeedback({type:"error", msg: res.error});
+                           setTimeout(()=>setFeedback(null), 4000);
+                        }
+                    }
+                 }
+              }}/>
+            </button>
+          </div>
+
+          <div className="flex-1 px-4 py-2 overflow-y-auto pb-safe">
+            {lastLog && (
+               <div className={`border rounded-xl p-4 flex justify-between items-center shadow-sm animate-fade-in 
+                 ${lastLog.transactionType==="MOVE" ? "bg-blue-50 border-blue-200" : lastLog.transactionType==="RETURN" ? "bg-orange-50 border-orange-200" : "bg-green-50 border-green-200"}`}>
+                 <div>
+                    <span className="text-xs font-bold opacity-60">
+                      {lastLog.transactionType==="MOVE" ? `이동 완료` : lastLog.transactionType==="RETURN" ? "반품 처리" : "입고 완료"}
+                    </span>
+                    <p className="font-bold text-lg text-slate-800">{lastLog.productName}</p>
+                    <p className="text-xs text-slate-500">Lot: {lastLog.lotNumber || "-"}</p>
+                 </div>
+                 <div className="text-right">
+                    <span className="text-2xl font-black text-slate-700 block">{lastLog.weight}kg</span>
+                    {lastLog.unitPrice && <span className="text-xs text-slate-400">@{lastLog.unitPrice}원</span>}
+                 </div>
+               </div>
+            )}
+            {!lastLog && <div className="text-center py-10 text-slate-300">스캔 대기중...</div>}
+          </div>
+
+          {isModalOpen && (
+            <EditModal 
+              data={modalData} 
+              masterData={masterData}
+              onClose={()=>setIsModalOpen(false)} 
+              onSave={async (d) => { 
+                  await commitTransaction(d); 
+                  setGlobalSettings(prev => ({
+                      ...prev,
+                      location: d.location || prev.location,
+                      grade: d.grade || prev.grade,
+                      brand: d.brand || prev.brand,
+                      origin: d.origin || prev.origin,
+                      factoryNo: d.factoryNo || prev.factoryNo,
+                      storageType: d.storageType || prev.storageType,
+                      productName: d.productName || prev.productName,
+                      supplier: d.supplier || prev.supplier,
+                      unitPrice: d.unitPrice || prev.unitPrice,
+                      returnDestination: d.transactionType === "RETURN" ? (d.location || prev.returnDestination) : prev.returnDestination
+                  }));
+                  setIsModalOpen(false); 
+                  inputRef.current?.focus(); 
+              }} 
+            />
+          )}
+
+           {isAnalyzing && <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center text-white font-bold">AI 분석중...</div>}
+        </div>
+      );
+    }
+
+    // --- 2. History Screen ---
+    function HistoryScreen({ user, inventory, masterData }) {
+      const [startDate, setStartDate] = useState(getTodayString());
+      const [endDate, setEndDate] = useState(getTodayString());
+      const [selectedIds, setSelectedIds] = useState(new Set());
+      const [filterType, setFilterType] = useState("ALL"); 
+      const [isBriefingOpen, setIsBriefingOpen] = useState(false);
+      const [briefingText, setBriefingText] = useState("");
+      const [deleteModalTarget, setDeleteModalTarget] = useState(null); 
+      
+      const [isStockView, setIsStockView] = useState(false); 
+      const [stockDate, setStockDate] = useState(getTodayString());
+
+      const [bulkEditField, setBulkEditField] = useState(null);
+      const [editingItem, setEditingItem] = useState(null); 
+      const [bulkForm, setBulkForm] = useState({});
+      const [quickEdit, setQuickEdit] = useState(null);
+      const [locFilter, setLocFilter] = useState("ALL");
+
+      // 날짜 범위 필터링 (Safe Date Parsing)
+      const logs = useMemo(() => {
+         let filtered = inventory.filter(l => {
+             const itemDate = getSafeDate(l, 'processDate');
+             return itemDate >= startDate && itemDate <= endDate;
+         });
+         
+         if (filterType !== "ALL") filtered = filtered.filter(l => l.transactionType === filterType);
+         if (locFilter !== "ALL") filtered = filtered.filter(l => l.location === locFilter);
+         return filtered;
+      }, [inventory, startDate, endDate, filterType, locFilter]);
+      
+      // 총 중량 계산
+      const summaryStats = useMemo(() => {
+         return logs.reduce((acc, curr) => {
+             acc.count += 1;
+             acc.weight += parseFloat(curr.weight) || 0;
+             return acc;
+         }, { count: 0, weight: 0 });
+      }, [logs]);
+
+      // 창고별 재고 (특정 날짜 기준, Safe Date Parsing)
+      const stockByLoc = useMemo(() => {
+         const validItems = inventory.filter(i => {
+             const iDate = getSafeDate(i, 'inboundDate');
+             // 기준일보다 미래에 입고된 것은 제외
+             if (iDate > stockDate) return false;
+
+             if (i.status === "ACTIVE") return true; 
+             
+             if (i.status === "RETURNED") {
+                 const rDate = getSafeDate(i, 'returnDate');
+                 // 기준일에는 아직 반품되지 않았음
+                 if (rDate > stockDate) return true;
+             }
+             return false;
+         });
+
+         const locs = {};
+         validItems.forEach(i => {
+            let loc = i.location || "미지정";
+            if (!locs[loc]) locs[loc] = { weight:0, count:0, items:{} };
+            locs[loc].weight += parseFloat(i.weight) || 0;
+            locs[loc].count += 1;
+            const pName = i.productName || "기타";
+            if(!locs[loc].items[pName]) locs[loc].items[pName] = { w:0, c:0 };
+            locs[loc].items[pName].w += parseFloat(i.weight) || 0;
+            locs[loc].items[pName].c += 1;
+         });
+         return locs;
+      }, [inventory, stockDate]);
+
+      const toggleSelection = (id) => {
+        const s = new Set(selectedIds);
+        s.has(id) ? s.delete(id) : s.add(id);
+        setSelectedIds(s);
+      };
+
+      const toggleAll = () => {
+         if (selectedIds.size === logs.length) setSelectedIds(new Set());
+         else setSelectedIds(new Set(logs.map(l => l.id)));
+      };
+
+      const updateField = async (id, field, value) => {
+        if (!value) return; 
+        try {
+           const { db, updateDoc, doc } = window.__fb;
+           const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+           await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), { [field]: value }); 
+        } catch(e) { console.error(e); }
+      };
+
+      const handleFullUpdate = async (updatedData) => {
+         try {
+            const { db, updateDoc, doc } = window.__fb;
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const payload = cleanPayload(updatedData);
+            await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", updatedData.id), payload);
+            setEditingItem(null);
+         } catch(e) { alert("수정 실패: " + e.message); }
+      };
+
+      const executeDelete = async () => {
+         if (!deleteModalTarget) return;
+         try {
+            const { db, deleteDoc, doc } = window.__fb;
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            await deleteDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", deleteModalTarget));
+            setDeleteModalTarget(null);
+         } catch(e) { alert("삭제 실패: " + e.message); }
+      };
+
+      const handleBatchInput = async (val) => {
+         if (selectedIds.size === 0 || !bulkEditField || !val) return;
+         const { db, updateDoc, doc } = window.__fb;
+         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+         const promises = Array.from(selectedIds).map(id => 
+            updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), { [bulkEditField]: val })
+         );
+         await Promise.all(promises);
+         alert("일괄 입력 완료");
+         setBulkEditField(null);
+         setSelectedIds(new Set());
+      };
+
+      const handleBulkFullUpdate = async () => {
+         if (selectedIds.size === 0) return;
+         const { db, updateDoc, doc } = window.__fb;
+         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+         const updates = cleanPayload(bulkForm);
+         const promises = Array.from(selectedIds).map(id => 
+            updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), updates)
+         );
+         await Promise.all(promises);
+         alert("상세 일괄 변경 완료");
+         setBulkEditField(null);
+         setBulkForm({});
+         setSelectedIds(new Set());
+      };
+
+      const handleBriefing = async () => {
+         if(logs.length===0) return alert("데이터 없음");
+         setIsBriefingOpen(true); setBriefingText("분석중...");
+         const summary = logs.map(l => `${l.productName} ${l.weight}kg`).join(", ");
+         const text = await callGeminiText(`이 원육 재고 데이터를 바탕으로 관리자 브리핑을 작성해주세요. 총 중량과 주요 품목별 비중을 분석하고, 한국어로 자연스럽게 작성해주세요. 마크다운 서식(별표 등)은 제외하고 텍스트로만 정리해주세요. 데이터: ${summary}`);
+         setBriefingText(text);
+      };
+
+      const handleExcelExport = () => {
+         if(inventory.length === 0) return alert("데이터가 없습니다.");
+         const ws = XLSX.utils.json_to_sheet(inventory.map(i => ({
+            "상태": i.status,
+            "구분": i.transactionType,
+            "작업일": i.processDate,
+            "입고일": i.inboundDate || i.processDate,
+            "이동일": i.moveDate || "-",
+            "반품일": i.returnDate || "-",
+            "품명": i.productName,
+            "중량(kg)": i.weight,
+            "위치": i.location,
+            "브랜드": i.brand,
+            "등급": i.grade,
+            "원산지": i.origin,
+            "공장": i.factoryNo,
+            "거래처": i.supplier,
+            "단가": i.unitPrice,
+            "이력번호": i.traceabilityNo,
+            "비고": i.userNote,
+            "바코드": i.barcode
+         })));
+         const wb = XLSX.utils.book_new();
+         XLSX.utils.book_append_sheet(wb, ws, "Inventory");
+         XLSX.writeFile(wb, `재고관리_${getTodayString()}.xlsx`);
+      };
+
+      if (isStockView) {
+         return (
+            <div className="flex flex-col h-full bg-slate-100 p-4 overflow-y-auto pb-safe">
+               <div className="flex justify-between items-center mb-4 bg-white p-4 rounded-xl shadow-sm">
+                  <div>
+                      <h2 className="text-xl font-bold text-slate-800">🏢 창고별 재고 현황</h2>
+                      <div className="flex items-center gap-2 mt-1">
+                          <span className="text-xs text-slate-500">기준일자:</span>
+                          <input type="date" value={stockDate} onChange={e=>setStockDate(e.target.value)} className="bg-slate-100 text-sm font-bold rounded px-2 py-1 outline-none" />
+                      </div>
+                  </div>
+                  <button onClick={()=>setIsStockView(false)} className="bg-slate-100 px-4 py-2 rounded-lg font-bold text-sm text-slate-600">닫기</button>
+               </div>
+               <div className="space-y-4 mt-2">
+                  {Object.entries(stockByLoc).map(([loc, data]) => (
+                     <div key={loc} className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+                        <div className="flex justify-between items-center mb-3 border-b border-slate-100 pb-2">
+                           <h3 className="font-bold text-lg text-indigo-700">{loc}</h3>
+                           <div className="text-right">
+                              <div className="text-2xl font-black text-slate-800">{data.weight.toFixed(2)}<span className="text-sm text-slate-400 font-normal">kg</span></div>
+                              <div className="text-xs text-slate-400 font-bold">{data.count}박스</div>
+                           </div>
+                        </div>
+                        <div className="space-y-2">
+                           {Object.entries(data.items).map(([pName, pData]) => (
+                              <div key={pName} className="flex justify-between text-sm text-slate-600">
+                                 <span>{pName}</span>
+                                 <span className="font-bold">{pData.w.toFixed(2)}kg <span className="text-xs text-slate-400">({pData.c})</span></span>
+                              </div>
+                           ))}
+                        </div>
+                     </div>
+                  ))}
+                  {Object.keys(stockByLoc).length === 0 && <div className="text-center py-20 text-slate-400">해당 일자에 재고가 없습니다.</div>}
+               </div>
+            </div>
+         );
+      }
+
+      return (
+        <div className="flex flex-col h-full bg-slate-50">
+          <div className="bg-white p-4 border-b border-slate-200 sticky top-0 z-10 shadow-sm flex flex-col gap-2">
+            
+            {/* Header Area */}
+            <div className="flex justify-between items-center">
+                 <h2 className="font-bold text-lg text-slate-800">이력/재고</h2>
+                 <div className="flex gap-2">
+                    <button onClick={()=>setIsStockView(true)} className="bg-slate-800 text-white px-3 py-2 rounded-lg font-bold text-xs shadow-lg whitespace-nowrap">🏢 재고</button>
+                    <button onClick={handleExcelExport} className="bg-green-600 text-white px-3 py-2 rounded-lg font-bold text-xs shadow whitespace-nowrap">📥 엑셀</button>
+                    <button onClick={handleBriefing} className="bg-indigo-50 text-indigo-600 px-3 py-2 rounded-lg font-bold text-xs border border-indigo-100 shadow-sm whitespace-nowrap">✨ 분석</button>
+                 </div>
+            </div>
+
+            {/* Date Range Picker (Separated Line) */}
+            <div className="flex items-center gap-2 bg-slate-100 p-2 rounded-lg">
+               <input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)} 
+                 className="bg-transparent font-bold text-sm px-1 outline-none text-slate-700 w-full text-center" />
+               <span className="text-slate-400 font-bold">~</span>
+               <input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)} 
+                 className="bg-transparent font-bold text-sm px-1 outline-none text-slate-700 w-full text-center" />
+            </div>
+            
+            {/* Summary Box (Total Weight) */}
+            <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-xl flex justify-between items-center shadow-sm">
+              <span className="text-indigo-800 font-bold text-xs flex items-center gap-1">
+                  <span>📊</span> 
+                  {filterType==="ALL"?"전체":filterType==="INBOUND"?"입고":filterType==="MOVE"?"이동":"반품"} 합계
+              </span>
+              <div className="text-right">
+                 <span className="text-indigo-900 font-black text-lg block leading-none">
+                     {summaryStats.weight.toFixed(2)}<span className="text-xs font-normal ml-0.5">kg</span>
+                 </span>
+                 <span className="text-[10px] text-indigo-400 font-bold">{summaryStats.count}건</span>
+              </div>
+           </div>
+
+            {/* Filter Buttons */}
+            <div className="flex flex-wrap gap-2">
+               {["ALL","INBOUND","MOVE","RETURN"].map(t => (
+                  <button key={t} onClick={()=>setFilterType(t)} 
+                     className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all shadow-sm border ${filterType===t ? "bg-indigo-600 text-white border-indigo-600":"bg-white text-slate-500 border-slate-200"}`}>
+                     {t==="ALL"?"전체":t==="INBOUND"?"입고":t==="MOVE"?"이동":"반품"}
+                  </button>
+               ))}
+               <select value={locFilter} onChange={(e)=>setLocFilter(e.target.value)} className="bg-white text-xs font-bold rounded-lg px-2 py-2 outline-none border border-slate-200 shadow-sm">
+                  <option value="ALL">전체 창고</option>
+                  {masterData.locations.map(l=><option key={l} value={l}>{l}</option>)}
+               </select>
+            </div>
+          </div>
+          
+          {selectedIds.size > 0 && (
+             <div className="bg-indigo-600 text-white px-4 py-3 flex flex-col gap-2 animate-slide-up sticky top-[210px] z-20 shadow-md">
+                <div className="flex justify-between items-center">
+                   <span className="font-bold text-sm">{selectedIds.size}개 선택됨</span>
+                   <button onClick={()=>setSelectedIds(new Set())} className="text-indigo-200 text-xs underline">취소</button>
+                </div>
+                {!bulkEditField ? (
+                   <div className="flex gap-2">
+                      <button onClick={()=>setBulkEditField("traceabilityNo")} className="bg-white text-indigo-600 px-2 py-1 rounded text-xs font-bold">이력번호</button>
+                      <button onClick={()=>setBulkEditField("userNote")} className="bg-white text-indigo-600 px-2 py-1 rounded text-xs font-bold">비고</button>
+                      <button onClick={()=>setBulkEditField("FULL")} className="bg-indigo-800 text-white border border-indigo-400 px-2 py-1 rounded text-xs font-bold">상세 일괄 변경</button>
+                   </div>
+                ) : bulkEditField === "FULL" ? (
+                   <div className="text-xs">상세 변경 팝업 대기중...</div>
+                ) : (
+                   <div className="flex gap-2">
+                      <input 
+                         placeholder="일괄 입력값..."
+                         className="flex-1 text-slate-800 rounded px-2 py-1.5 text-sm outline-none"
+                         onKeyDown={(e)=>{if(e.key==='Enter') handleBatchInput(e.target.value)}}
+                      />
+                      <button onClick={(e)=>handleBatchInput(e.target.previousSibling.value)} className="bg-white text-indigo-600 font-bold px-3 rounded text-xs">확인</button>
+                      <button onClick={()=>setBulkEditField(null)} className="text-white text-xs px-2">취소</button>
+                   </div>
+                )}
+             </div>
+          )}
+
+          <div className="flex-1 p-4 space-y-3 overflow-y-auto pb-safe">
+             <div className="flex justify-end px-1">
+                <button onClick={toggleAll} className="text-xs font-bold text-slate-500">
+                   {selectedIds.size === logs.length && logs.length > 0 ? "전체해제" : "전체선택"}
+                </button>
+             </div>
+             
+            {logs.map((log, idx) => (
+               <div key={log.id} 
+                 className={`bg-white p-4 rounded-xl border shadow-sm flex flex-col gap-2 transition-all cursor-pointer relative
+                 ${selectedIds.has(log.id) ? "border-indigo-500 ring-2 ring-indigo-500 bg-indigo-50/10" : "border-slate-100"}
+                 ${log.transactionType==="RETURN" ? "opacity-70 grayscale-[0.5]" : ""}`}
+                 onClick={(e) => { 
+                    if(e.target.tagName !== 'BUTTON' && e.target.tagName !== 'INPUT') toggleSelection(log.id); 
+                 }}>
+                 
+                 <div className="flex justify-between items-start">
+                   <div className="flex items-center gap-3">
+                     <div className={`w-5 h-5 rounded flex items-center justify-center border ${selectedIds.has(log.id)?"bg-indigo-600 border-indigo-600":"border-slate-300 bg-slate-50"}`}>
+                        {selectedIds.has(log.id) && <span className="text-white text-xs">✓</span>}
+                     </div>
+                     <Badge type={log.transactionType} />
+                     <span className="font-bold text-slate-800">{log.productName}</span>
+                   </div>
+                   <div className="text-right">
+                      <span className="font-black text-lg text-indigo-600 block">{log.weight.toFixed(2)}kg</span>
+                      {log.unitPrice && <span className="text-xs text-slate-400">@{log.unitPrice}</span>}
+                   </div>
+                 </div>
+                 
+                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500 bg-slate-50 p-2 rounded-lg mt-1" onClick={(e)=>{e.stopPropagation(); setEditingItem(log);}}>
+                    <div>📍 {log.location}</div>
+                    <div>🏭 {log.factoryNo} / {log.grade}</div>
+                    <div className="col-span-2 flex gap-2">
+                        {log.inboundDate && <span className="text-indigo-400">입고: {log.inboundDate.substring(0,10)}</span>}
+                        {log.moveDate && <span className="text-blue-400">이동: {log.moveDate.substring(0,10)}</span>}
+                        {log.returnDate && <span className="text-orange-400">반품: {log.returnDate.substring(0,10)}</span>}
+                    </div>
+                    <div>📅 패킹: {log.packingDate}</div>
+                    <div>🏷 {log.brand} / {log.origin}</div>
+                    {log.supplier && <div className="col-span-2 text-indigo-500 font-bold">🏢 {log.supplier}</div>}
+                    {/* Fixed: Added break-all for QR code display */}
+                    <div className="col-span-2 text-[10px] text-slate-400 mt-1 font-mono break-all whitespace-normal leading-tight">ID: {log.barcode || log.lotNumber}</div>
+                 </div>
+
+                 <div className="flex flex-col gap-2 border-t pt-2 mt-1 relative z-10">
+                    <div className="flex gap-2">
+                       <button onClick={(e)=>{ e.stopPropagation(); setQuickEdit({ id: log.id, field: 'traceabilityNo', val: log.traceabilityNo, title: "이력번호 수정" }); }}
+                          className={`flex-1 px-2 py-2 rounded border text-xs font-bold flex justify-between items-center ${log.traceabilityNo?"bg-green-50 text-green-700 border-green-200":"bg-white text-slate-400 border-slate-200"}`}>
+                          <span className="truncate">{log.traceabilityNo || "이력번호"}</span>
+                          <span>✏️</span>
+                       </button>
+                       <button onClick={(e)=>{ e.stopPropagation(); setQuickEdit({ id: log.id, field: 'userNote', val: log.userNote, title: "비고 수정" }); }}
+                          className={`flex-1 px-2 py-2 rounded border text-xs font-bold flex justify-between items-center ${log.userNote?"bg-yellow-50 text-yellow-700 border-yellow-200":"bg-white text-slate-400 border-slate-200"}`}>
+                          <span className="truncate">{log.userNote || "비고"}</span>
+                          <span>✏️</span>
+                       </button>
+                    </div>
+                 </div>
+
+                 <div className="flex justify-between items-center pt-2 border-t border-slate-50 mt-1 relative z-10">
+                    <button onClick={(e)=>{e.stopPropagation(); setEditingItem(log);}} className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                       ✏️ 전체 수정
+                    </button>
+                    <button onClick={(e)=>{ e.stopPropagation(); setDeleteModalTarget(log.id); }} className="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                       🗑 삭제
+                    </button>
+                 </div>
+               </div>
+            ))}
+            {logs.length === 0 && <div className="text-center py-20 text-slate-400">내역이 없습니다.</div>}
+          </div>
+
+          {editingItem && (
+             <EditModal 
+               data={editingItem} 
+               masterData={masterData}
+               onClose={()=>setEditingItem(null)} 
+               onSave={handleFullUpdate} 
+             />
+          )}
+
+          {quickEdit && (
+            <PromptModal 
+              title={quickEdit.title}
+              initialValue={quickEdit.val}
+              onClose={() => setQuickEdit(null)}
+              onSave={(newVal) => {
+                updateField(quickEdit.id, quickEdit.field, newVal);
+                setQuickEdit(null);
+              }}
+            />
+          )}
+
+          {bulkEditField === "FULL" && (
+             <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+                <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
+                   <h3 className="font-bold text-lg mb-4">📦 상세 일괄 변경 ({selectedIds.size}개)</h3>
+                   <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+                      <Select label="등급" val={bulkForm.grade} opt={masterData.grades} onChange={v=>setBulkForm({...bulkForm, grade:v})} />
+                      <Select label="원산지" val={bulkForm.origin} opt={masterData.origins} onChange={v=>setBulkForm({...bulkForm, origin:v})} />
+                      <Select label="브랜드" val={bulkForm.brand} opt={masterData.brands} onChange={v=>setBulkForm({...bulkForm, brand:v})} />
+                      <Select label="공장" val={bulkForm.factoryNo} opt={masterData.factories} onChange={v=>setBulkForm({...bulkForm, factoryNo:v})} />
+                      <Select label="부위" val={bulkForm.productName} opt={masterData.productNames} onChange={v=>setBulkForm({...bulkForm, productName:v})} />
+                      <Input label="단가 일괄적용" type="number" val={bulkForm.unitPrice} onChange={v=>setBulkForm({...bulkForm, unitPrice:v})} />
+                   </div>
+                   <div className="flex gap-2 mt-6">
+                      <button onClick={()=>setBulkEditField(null)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-600">취소</button>
+                      <button onClick={handleBulkFullUpdate} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold">일괄 적용</button>
+                   </div>
+                </div>
+             </div>
+          )}
+
+          {deleteModalTarget && (
+             <div className="fixed inset-0 z-[99] bg-black/60 flex items-center justify-center p-4">
+                <div className="bg-white w-full max-w-xs rounded-2xl p-6 shadow-2xl animate-fade-in text-center">
+                   <div className="text-4xl mb-4">🗑</div>
+                   <h3 className="font-bold text-lg text-slate-800 mb-2">정말 삭제하시겠습니까?</h3>
+                   <p className="text-sm text-slate-500 mb-6">삭제된 데이터는 복구할 수 없습니다.</p>
+                   <div className="flex gap-3">
+                      <button onClick={()=>setDeleteModalTarget(null)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-600">취소</button>
+                      <button onClick={executeDelete} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-bold shadow-lg shadow-red-200">삭제하기</button>
+                   </div>
+                </div>
+             </div>
+          )}
+
+          {isBriefingOpen && (
+             <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+                <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
+                   <h3 className="font-bold text-lg mb-2">✨ AI 브리핑</h3>
+                   <div className="text-sm text-slate-600 mb-4 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">{briefingText}</div>
+                   <button onClick={()=>setIsBriefingOpen(false)} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold">닫기</button>
+                </div>
+             </div>
+          )}
+        </div>
+      );
+    }
+
+    // --- 3. Stats Screen (Revised) ---
+    function StatsScreen({ inventory }) {
+       const [currentDate, setCurrentDate] = useState(new Date());
+       const [viewMode, setViewMode] = useState("MONTH"); 
+       const [isBriefingOpen, setIsBriefingOpen] = useState(false);
+       const [briefingText, setBriefingText] = useState("");
+       
+       const moveDate = (dir) => {
+         const d = new Date(currentDate);
+         if (viewMode === "MONTH") d.setMonth(d.getMonth() + dir);
+         else d.setFullYear(d.getFullYear() + dir);
+         setCurrentDate(d);
+       };
+
+       const targetLabel = viewMode === "MONTH" 
+         ? `${currentDate.getFullYear()}년 ${currentDate.getMonth()+1}월`
+         : `${currentDate.getFullYear()}년`;
+
+       const filteredItems = useMemo(() => {
+         return inventory.filter(item => {
+            // Safe Date Parsing
+            const dateStr = getSafeDate(item, 'inboundDate');
+            if(!dateStr) return false;
+            
+            if (viewMode === "MONTH") {
+               const targetMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth()+1).padStart(2,'0')}`;
+               return dateStr.startsWith(targetMonth);
+            } else {
+               const targetYear = `${currentDate.getFullYear()}`;
+               return dateStr.startsWith(targetYear);
+            }
+         });
+       }, [inventory, currentDate, viewMode]);
+
+       const stats = useMemo(() => {
+         const totalInbound = filteredItems
+            .filter(i => i.initialType === "INBOUND") 
+            .reduce((a,b) => a + (parseFloat(b.weight)||0), 0);
+         return { totalInbound };
+       }, [filteredItems]);
+
+       const chartData = (key) => {
+         const g = {};
+         filteredItems.forEach(i => {
+            if (i.initialType !== "INBOUND") return;
+            const k = i[key] || "미지정";
+            if(!g[k]) g[k] = 0;
+            g[k] += parseFloat(i.weight) || 0;
+         });
+         return Object.entries(g).map(([name, value]) => ({name, value})).sort((a,b)=>b.value-a.value).slice(0,5);
+       };
+
+       const handleStatsBriefing = async () => {
+          if(filteredItems.length === 0) return alert("분석할 데이터가 없습니다.");
+          setIsBriefingOpen(true); 
+          setBriefingText("AI 분석중...");
+          
+          const topProducts = chartData('productName').map(d => `${d.name}(${d.value.toFixed(1)}kg)`).join(", ");
+          const topBrands = chartData('brand').map(d => `${d.name}(${d.value.toFixed(1)}kg)`).join(", ");
+          
+          const prompt = `이 원육 입고 데이터를 바탕으로 경영 리포트를 작성해주세요. 
+          기간: ${targetLabel}
+          총 입고량: ${stats.totalInbound.toFixed(2)}kg
+          주요 품목: ${topProducts}
+          주요 브랜드: ${topBrands}
+          
+          위 데이터를 바탕으로 트렌드를 분석하고 경영 제언을 한국어로 자연스럽게 작성해주세요. 마크다운 서식은 제외하고 텍스트로만 정리해주세요.`;
+          
+          const text = await callGeminiText(prompt);
+          setBriefingText(text);
+       };
+
+       return (
+         <div className="h-full flex flex-col bg-slate-50 p-4 overflow-y-auto pb-safe">
+            <div className="flex justify-between items-center mb-6">
+               <h2 className="text-xl font-bold text-slate-800">📈 경영 통계 (입고 기준)</h2>
+               <div className="flex gap-2">
+                  <button onClick={handleStatsBriefing} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-bold text-xs border border-indigo-100 shadow-sm flex items-center gap-1">
+                     ✨ AI 분석
+                  </button>
+                  <div className="bg-slate-200 rounded-lg p-1 flex text-xs font-bold">
+                     <button onClick={()=>setViewMode("MONTH")} className={`px-3 py-1.5 rounded-md ${viewMode==="MONTH"?"bg-white shadow":""}`}>월별</button>
+                     <button onClick={()=>setViewMode("YEAR")} className={`px-3 py-1.5 rounded-md ${viewMode==="YEAR"?"bg-white shadow":""}`}>연도별</button>
+                  </div>
+               </div>
+            </div>
+
+            <div className="flex items-center justify-center gap-4 mb-6 bg-white p-4 rounded-2xl shadow-sm">
+               <button onClick={()=>moveDate(-1)} className="text-2xl text-slate-400 hover:text-indigo-600 font-bold">‹</button>
+               <span className="text-lg font-black text-slate-800">{targetLabel}</span>
+               <button onClick={()=>moveDate(1)} className="text-2xl text-slate-400 hover:text-indigo-600 font-bold">›</button>
+            </div>
+
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4 text-center">
+               <span className="text-sm font-bold text-slate-400 block mb-1">총 입고 중량</span>
+               <span className="text-4xl font-black text-indigo-600 tracking-tight">{stats.totalInbound.toFixed(2)}<span className="text-lg text-slate-300 ml-1">kg</span></span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4">
+               <BarChart data={chartData('productName')} title="부위별 입고 (Top 5)" color="indigo" />
+               <BarChart data={chartData('brand')} title="브랜드별 입고 (Top 5)" color="green" />
+               <BarChart data={chartData('supplier')} title="거래처별 입고 (Top 5)" color="orange" />
+               <BarChart data={chartData('grade')} title="등급별 입고 (Top 5)" color="blue" />
+            </div>
+
+            {isBriefingOpen && (
+               <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+                  <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
+                     <h3 className="font-bold text-lg mb-2">✨ 경영 분석 리포트</h3>
+                     <div className="text-sm text-slate-600 mb-4 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">{briefingText}</div>
+                     <button onClick={()=>setIsBriefingOpen(false)} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold">닫기</button>
+                  </div>
+               </div>
+            )}
+         </div>
+       );
+    }
+
+    // --- 4. Settings Screen ---
+    function SettingsScreen({ user, masterData, setMasterData }) {
+      const [activeCat, setActiveCat] = useState("locations");
+      const CATS = [
+        {k:"locations", n:"입고위치"}, {k:"productNames", n:"부위명"}, 
+        {k:"factories", n:"공장번호"}, {k:"brands", n:"브랜드"}, 
+        {k:"grades", n:"등급"}, {k:"origins", n:"원산지"},
+        {k:"suppliers", n:"거래처"}, {k:"returnDestinations", n:"반품처"}
+      ];
+
+      const updateMaster = async (newData) => {
+         setMasterData(newData);
+         const { db, doc, setDoc } = window.__fb;
+         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+         await setDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data"), newData, {merge:true});
+      };
+
+      const addVal = (val) => {
+         if(!val) return;
+         const list = masterData[activeCat] || [];
+         if(!list.includes(val)) updateMaster({...masterData, [activeCat]: [...list, val]});
+      };
+      
+      const delVal = (val) => {
+         const list = masterData[activeCat] || [];
+         updateMaster({...masterData, [activeCat]: list.filter(v=>v!==val)});
+      };
+
+      return (
+         <div className="h-full flex flex-col bg-white">
+            <div className="flex overflow-x-auto border-b">
+               {CATS.map(c => (
+                  <button key={c.k} onClick={()=>setActiveCat(c.k)} 
+                    className={`px-4 py-3 text-sm font-bold whitespace-nowrap ${activeCat===c.k ? "text-indigo-600 border-b-2 border-indigo-600" : "text-slate-400"}`}>
+                    {c.n}
+                  </button>
+               ))}
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 bg-slate-50 pb-safe">
+               {(masterData[activeCat]||[]).map(v => (
+                  <div key={v} className="bg-white p-3 mb-2 rounded-lg border border-slate-200 flex justify-between">
+                     <span className="font-bold">{v}</span>
+                     <button onClick={()=>delVal(v)} className="text-red-400 font-bold">✕</button>
+                  </div>
+               ))}
+            </div>
+            <div className="p-4 border-t bg-white pb-safe">
+               <AddItem onAdd={addVal} placeholder={`${CATS.find(c=>c.k===activeCat).n} 추가`} />
+            </div>
+         </div>
+      );
+    }
+
+    // --- Components ---
+    function EditModal({ data, masterData, onClose, onSave }) {
+       const [form, setForm] = useState(data);
+       // Ensure form updates when data prop changes (e.g. if different item clicked)
+       useEffect(() => { setForm(data); }, [data]);
+
+       return (
+         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+             <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-6 animate-slide-up max-h-[90vh] overflow-y-auto">
+                <h2 className="text-xl font-black mb-4">📝 정보 수정</h2>
+                <div className="space-y-3">
+                   <div className="grid grid-cols-2 gap-3">
+                      <Select label="부위명" val={form.productName} opt={masterData.productNames} onChange={v=>setForm({...form, productName:v})} />
+                      <Input label="중량(kg)" type="number" val={form.weight} onChange={v=>setForm({...form, weight:parseFloat(v)})} />
+                   </div>
+                   <div className="grid grid-cols-2 gap-3">
+                      <Select label="브랜드" val={form.brand} opt={masterData.brands} onChange={v=>setForm({...form, brand:v})} />
+                      <Select label="원산지" val={form.origin} opt={masterData.origins} onChange={v=>setForm({...form, origin:v})} />
+                   </div>
+                   <div className="grid grid-cols-2 gap-3">
+                      <Select label="등급" val={form.grade} opt={masterData.grades} onChange={v=>setForm({...form, grade:v})} />
+                      <Select label="공장" val={form.factoryNo} opt={masterData.factories} onChange={v=>setForm({...form, factoryNo:v})} />
+                   </div>
+                   <div className="grid grid-cols-2 gap-3">
+                      <Select label="위치" val={form.location} opt={masterData.locations} onChange={v=>setForm({...form, location:v})} />
+                      <Input label="패킹일자" type="date" val={form.packingDate} onChange={v=>setForm({...form, packingDate:v})} />
+                   </div>
+                   <div className="grid grid-cols-2 gap-3">
+                      <Select label="거래처" val={form.supplier} opt={masterData.suppliers} onChange={v=>setForm({...form, supplier:v})} />
+                      <Input label="단가" type="number" val={form.unitPrice} onChange={v=>setForm({...form, unitPrice:v})} />
+                   </div>
+                   <Input label="비고" val={form.userNote} onChange={v=>setForm({...form, userNote:v})} />
+                </div>
+                <div className="mt-6 flex gap-2">
+                   <button onClick={onClose} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-600">취소</button>
+                   <button onClick={()=>onSave(form)} className="flex-1 py-3 bg-indigo-600 rounded-xl font-bold text-white shadow-lg">저장</button>
+                </div>
+             </div>
+         </div>
+       );
+    }
+
+    function Select({ label, val, opt=[], onChange }) {
+       return (
+         <div className="bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+             <div className="text-[10px] text-slate-400 font-bold">{label}</div>
+             <select value={val||""} onChange={e=>onChange(e.target.value)} className="bg-transparent w-full font-bold outline-none text-sm h-6">
+                <option value="">선택</option>
+                {opt.map(o=><option key={o} value={o}>{o}</option>)}
+             </select>
+         </div>
+       );
+    }
+
+    function ModeBtn({ label, active, onClick, color }) {
+       const colors = {
+         indigo: active ? "bg-white text-indigo-600 shadow ring-1 ring-black/5" : "text-slate-400",
+         orange: active ? "bg-white text-orange-600 shadow ring-1 ring-black/5" : "text-slate-400",
+         blue: active ? "bg-white text-blue-600 shadow ring-1 ring-black/5" : "text-slate-400"
+       };
+       return <button onClick={onClick} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${colors[color]}`}>{label}</button>;
+    }
+
+    function SelectChip({ label, value, options=[], onChange, highlight, highlightRed }) {
+       const base = "flex-shrink-0 flex flex-col border rounded-lg px-3 py-1.5 min-w-[100px]";
+       const style = highlight ? "bg-blue-50 border-blue-200" : highlightRed ? "bg-orange-50 border-orange-200" : "bg-slate-50 border-slate-200";
+       const textStyle = highlight ? "text-blue-500" : highlightRed ? "text-orange-500" : "text-slate-400";
+       return (
+         <div className={`${base} ${style}`}>
+             <span className={`text-[10px] font-bold mb-0.5 ${textStyle}`}>{label}</span>
+             <select value={value} onChange={e=>onChange(e.target.value)} className="bg-transparent text-sm font-bold outline-none w-full">
+                <option value="">선택</option>
+                {options.map(o=><option key={o} value={o}>{o}</option>)}
+             </select>
+         </div>
+       );
+    }
+
+    function Toggle({ checked, onChange }) {
+       return (
+         <div onClick={()=>onChange(!checked)} className={`w-10 h-6 rounded-full p-1 cursor-pointer transition-colors ${checked?"bg-indigo-600":"bg-slate-300"}`}>
+             <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${checked?"translate-x-4":"translate-x-0"}`}></div>
+         </div>
+       );
+    }
+
+    function Badge({ type }) {
+       if(type==="RETURN") return <span className="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded text-[10px] font-bold">반품</span>;
+       if(type==="MOVE") return <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[10px] font-bold">이동</span>;
+       return <span className="bg-green-100 text-green-700 px-1.5 py-0.5 rounded text-[10px] font-bold">입고</span>;
+    }
+
+    function Input({ label, val, onChange, type="text" }) {
+       return (
+         <div className="bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+             <div className="text-[10px] text-slate-400 font-bold">{label}</div>
+             <input type={type} value={val||""} onChange={e=>onChange(e.target.value)} className="bg-transparent w-full font-bold outline-none" />
+         </div>
+       );
+    }
+
+    function NavButton({ label, icon, active, onClick }) {
+       return (
+         <button onClick={onClick} className={`flex flex-col items-center w-16 p-1 transition-all ${active?"text-indigo-600 scale-105":"text-slate-400"}`}>
+             <span className="text-xl mb-0.5">{icon}</span>
+             <span className="text-[10px] font-bold">{label}</span>
+         </button>
+       );
+    }
+    
+    function AddItem({ onAdd, placeholder }) {
+       const [v, sV] = useState("");
+       return <div className="flex gap-2"><input value={v} onChange={e=>sV(e.target.value)} className="flex-1 bg-slate-100 rounded-lg px-3 outline-none" placeholder={placeholder} /><button onClick={()=>{onAdd(v);sV("")}} className="bg-indigo-600 text-white px-4 rounded-lg font-bold">추가</button></div>
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<MeatWMS_Pro_V4_5 />);
+  </script>
+</body>
+</html>
