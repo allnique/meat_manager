@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>원육 매니저 V4.36 (Security Patch)</title>
+    <title>원육 매니저 V4.37 (Bug Fix)</title>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -308,7 +308,6 @@
     };
 
     // --- Gemini API (User Managed Key) ---
-    // Security Fix: Do not hardcode API key. Use localStorage.
     const AI_MODEL = "gemini-1.5-flash";
 
     function getApiKey() {
@@ -432,7 +431,7 @@
     // --- Main App ---
     function MeatWMS_Pro_V4_36() {
       const [user, setUser] = useState(null);
-      const [activeTab, setActiveTab] = useState("SCAN");
+      const [activeTab, setActiveTab] = useState("HISTORY"); // 디버깅 편의를 위해 HISTORY 기본
       const [masterData, setMasterData] = useState(DEFAULT_MASTER_DATA);
 
       const [globalSettings, setGlobalSettings] = useState({
@@ -501,7 +500,7 @@
             <div className="flex items-center justify-between">
                <div className="flex items-center gap-2">
                   <div className="bg-indigo-600 p-1.5 rounded-lg shadow-sm">
-                     <span className="text-white text-xs font-black">V4.36</span>
+                     <span className="text-white text-xs font-black">V4.37</span>
                   </div>
                   <h1 className="font-bold text-lg text-slate-800 tracking-tight">원육 매니저</h1>
                </div>
@@ -1057,7 +1056,6 @@
       };
 
       const updateField = async (id, field, value) => {
-        // if (!value) return; // Allow empty string to clear value
         try {
            const { db, updateDoc, doc } = window.__fb;
            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -1065,11 +1063,35 @@
         } catch(e) { console.error(e); }
       };
 
+      // 개별 상세 변경 로직
       const handleFullUpdate = async (updatedData) => {
          try {
             const { db, updateDoc, doc } = window.__fb;
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             const payload = cleanPayload(updatedData);
+
+            // UI 렌더링 동기화를 위한 history 데이터 강제 업데이트 처리
+            const original = logs.find(l => l.id === updatedData.id);
+            if (original && original.history && Array.isArray(original.history)) {
+                let updatedHistory = [...original.history];
+
+                // 입고일자 변경 시 동기화
+                if (payload.inboundDate && payload.inboundDate !== original.inboundDate && updatedHistory.length > 0) {
+                    const oldTime = updatedHistory[0].date && updatedHistory[0].date.length > 10 ? updatedHistory[0].date.substring(10) : "T00:00:00.000Z";
+                    updatedHistory[0].date = payload.inboundDate + oldTime;
+                    updatedHistory[0].workDate = payload.inboundDate;
+                }
+
+                // 위치 변경 시 동기화
+                if (payload.location && payload.location !== original.location && updatedHistory.length > 0) {
+                    const lastIdx = updatedHistory.length - 1;
+                    updatedHistory[lastIdx].to = payload.location;
+                    updatedHistory[lastIdx].location = payload.location;
+                }
+
+                payload.history = updatedHistory;
+            }
+
             await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", updatedData.id), payload);
             setEditingItem(null);
          } catch(e) { alert("수정 실패: " + e.message); }
@@ -1099,14 +1121,41 @@
          setSelectedIds(new Set());
       };
 
+      // 상세 일괄 변경 로직
       const handleBulkFullUpdate = async () => {
          if (selectedIds.size === 0) return;
          const { db, updateDoc, doc } = window.__fb;
          const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
          const updates = cleanPayload(bulkForm);
-         const promises = Array.from(selectedIds).map(id =>
-            updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), updates)
-         );
+
+         const promises = Array.from(selectedIds).map(id => {
+            const original = logs.find(l => l.id === id);
+            let itemUpdates = { ...updates };
+
+            // UI 렌더링 동기화를 위한 history 데이터 강제 업데이트 처리
+            if (original && original.history && Array.isArray(original.history)) {
+                let updatedHistory = [...original.history];
+
+                // 입고일자 변경 시 동기화
+                if (itemUpdates.inboundDate && updatedHistory.length > 0) {
+                    const oldTime = updatedHistory[0].date && updatedHistory[0].date.length > 10 ? updatedHistory[0].date.substring(10) : "T00:00:00.000Z";
+                    updatedHistory[0].date = itemUpdates.inboundDate + oldTime;
+                    updatedHistory[0].workDate = itemUpdates.inboundDate;
+                }
+
+                // 위치 변경 시 동기화
+                if (itemUpdates.location && updatedHistory.length > 0) {
+                    const lastIdx = updatedHistory.length - 1;
+                    updatedHistory[lastIdx].to = itemUpdates.location;
+                    updatedHistory[lastIdx].location = itemUpdates.location;
+                }
+
+                itemUpdates.history = updatedHistory;
+            }
+
+            return updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), itemUpdates);
+         });
+
          await Promise.all(promises);
          alert("상세 일괄 변경 완료");
          setBulkEditField(null);
@@ -1293,8 +1342,8 @@
                const dDay = getDDayString(expDate, log.storageType);
 
                const expStyle = dDay.status === 'expired'
-                  ? "text-red-600 font-black text-2xl animate-heartbeat"
-                  : dDay.status === 'warning'
+                 ? "text-red-600 font-black text-2xl animate-heartbeat"
+                 : dDay.status === 'warning'
                      ? "text-orange-600 font-bold text-xl"
                      : "text-slate-500 font-medium";
 
@@ -1327,7 +1376,7 @@
 
                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500 bg-slate-50 p-2 rounded-lg mt-1" onClick={(e)=>{e.stopPropagation(); setEditingItem(log);}}>
                     <div className="col-span-2 font-bold text-slate-700 flex flex-wrap items-center gap-1">
-                       📍
+                        📍
                        {log.history && log.history.length > 0 ? (
                            <div className="flex flex-wrap items-center">
                              <span>{log.history[0].location || "초기입고"}</span>
@@ -1375,7 +1424,7 @@
 
                     <div className="mt-1">📅 패킹: {log.packingDate}</div>
                     <div className="mt-1">🏷 {log.brand} / {log.origin}</div>
-                    <div>🏭 {log.factoryNo} / {log.grade}</div> {/* Moved Here */}
+                    <div>🏭 {log.factoryNo} / {log.grade}</div>
 
                     {/* 유통기한 및 디데이 표시 (강조됨) */}
                     <div className={`col-span-2 mt-2 flex items-center gap-2 ${expStyle}`}>
@@ -1387,7 +1436,7 @@
                     <div className="col-span-2 text-[10px] text-slate-400 mt-1 font-mono break-all whitespace-normal leading-tight">ID: {log.barcode || log.lotNumber}</div>
                  </div>
 
-                 {/* 이력번호/비고 입력란 복구 (직접 입력 형태) */}
+                 {/* 이력번호/비고 입력란 (직접 입력 형태) */}
                  <div className="flex gap-2 border-t pt-2 mt-1 relative z-10" onClick={(e)=>e.stopPropagation()}>
                     <input
                        placeholder="이력번호 입력"
@@ -1405,14 +1454,14 @@
 
                  <div className="flex justify-between items-center pt-2 border-t border-slate-50 mt-1 relative z-10">
                     <button onClick={(e)=>{e.stopPropagation(); setEditingItem(log);}} className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
-                       ✏️ 전체 수정
+                        ✏️ 전체 수정
                     </button>
                     <button onClick={(e)=>{
                         e.stopPropagation();
                         playSound("delete");
                         setDeleteModalTarget(log.id);
                     }} className="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
-                       🗑 삭제
+                        🗑 삭제
                     </button>
                  </div>
                </div>
@@ -1447,6 +1496,7 @@
                 <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
                    <h3 className="font-bold text-lg mb-4">📦 상세 일괄 변경 ({selectedIds.size}개)</h3>
                    <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+                      <Select label="보관방법" val={bulkForm.storageType} opt={masterData.storageTypes} onChange={v=>setBulkForm({...bulkForm, storageType:v})} />
                       <Select label="등급" val={bulkForm.grade} opt={masterData.grades} onChange={v=>setBulkForm({...bulkForm, grade:v})} />
                       <Select label="원산지" val={bulkForm.origin} opt={masterData.origins} onChange={v=>setBulkForm({...bulkForm, origin:v})} />
                       <Select label="브랜드" val={bulkForm.brand} opt={masterData.brands} onChange={v=>setBulkForm({...bulkForm, brand:v})} />
@@ -1457,8 +1507,9 @@
                       <div className="border-t pt-2 mt-2">
                         <p className="text-xs font-bold text-slate-400 mb-2">관리자 필드</p>
                         <Select label="현재위치 이동" val={bulkForm.location} opt={masterData.locations} onChange={v=>setBulkForm({...bulkForm, location:v})} />
-                        <Input label="입고일자 수정" type="date" val={bulkForm.inboundDate} onChange={v=>setForm({...form, inboundDate:v})} />
-                        <Input label="이동일자 수정" type="date" val={bulkForm.moveDate} onChange={v=>setForm({...form, moveDate:v})} />
+                        {/* Bug Fix 1: setForm -> setBulkForm 변경 적용 */}
+                        <Input label="입고일자 수정" type="date" val={bulkForm.inboundDate} onChange={v=>setBulkForm({...bulkForm, inboundDate:v})} />
+                        <Input label="이동일자 수정" type="date" val={bulkForm.moveDate} onChange={v=>setBulkForm({...bulkForm, moveDate:v})} />
                       </div>
                    </div>
                    <div className="flex gap-2 mt-6">
@@ -1498,7 +1549,6 @@
 
     // --- 3. Stats Screen ---
     function StatsScreen({ inventory }) {
-       // ... existing code ...
        const [currentDate, setCurrentDate] = useState(new Date());
        const [viewMode, setViewMode] = useState("MONTH");
        const [isBriefingOpen, setIsBriefingOpen] = useState(false);
@@ -1574,7 +1624,7 @@
                <h2 className="text-xl font-bold text-slate-800">📈 경영 통계 (입고 기준)</h2>
                <div className="flex gap-2">
                   <button onClick={handleStatsBriefing} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-bold text-xs border border-indigo-100 shadow-sm flex items-center gap-1">
-                     ✨ AI 분석
+                      ✨ AI 분석
                   </button>
                   <div className="bg-slate-200 rounded-lg p-1 flex text-xs font-bold">
                      <button onClick={()=>setViewMode("MONTH")} className={`px-3 py-1.5 rounded-md ${viewMode==="MONTH"?"bg-white shadow":""}`}>월별</button>
