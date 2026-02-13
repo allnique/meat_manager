@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>원육 매니저 V4.37 (Bug Fix)</title>
+    <title>원육 매니저 V4.38 (UI/Logic Fix)</title>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -431,7 +431,7 @@
     // --- Main App ---
     function MeatWMS_Pro_V4_36() {
       const [user, setUser] = useState(null);
-      const [activeTab, setActiveTab] = useState("HISTORY"); // 디버깅 편의를 위해 HISTORY 기본
+      const [activeTab, setActiveTab] = useState("SCAN");
       const [masterData, setMasterData] = useState(DEFAULT_MASTER_DATA);
 
       const [globalSettings, setGlobalSettings] = useState({
@@ -440,7 +440,8 @@
         grade: "", brand: "", origin: "",
         factoryNo: "", storageType: "냉장", productName: "",
         supplier: "", unitPrice: "",
-        packingDate: getTodayString(),
+        workDate: getTodayString(),
+        packingDate: "",
         returnDestination: ""
       });
 
@@ -500,7 +501,7 @@
             <div className="flex items-center justify-between">
                <div className="flex items-center gap-2">
                   <div className="bg-indigo-600 p-1.5 rounded-lg shadow-sm">
-                     <span className="text-white text-xs font-black">V4.37</span>
+                     <span className="text-white text-xs font-black">V4.38</span>
                   </div>
                   <h1 className="font-bold text-lg text-slate-800 tracking-tight">원육 매니저</h1>
                </div>
@@ -509,10 +510,10 @@
             {activeTab === "SCAN" && (
                 <div className="flex items-center gap-1 bg-slate-100 rounded-lg px-2 py-1 animate-fade-in self-start">
                   <span className="text-[10px] text-slate-400 font-bold">작업일</span>
-                  <input type="date" value={globalSettings.packingDate}
-                    onChange={e => setGlobalSettings(prev => ({...prev, packingDate: e.target.value}))}
+                  <input type="date" value={globalSettings.workDate}
+                    onChange={e => setGlobalSettings(prev => ({...prev, workDate: e.target.value}))}
                     className="bg-transparent text-xs font-bold outline-none w-24 text-right" />
-                  <button onClick={() => setGlobalSettings(prev => ({...prev, packingDate: getTodayString()}))}
+                  <button onClick={() => setGlobalSettings(prev => ({...prev, workDate: getTodayString()}))}
                     className="bg-white border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-bold text-slate-500 hover:bg-slate-50">오늘</button>
                 </div>
             )}
@@ -563,7 +564,7 @@
 
         try {
           const safeData = cleanPayload(data);
-          const currentWorkDate = globalSettings.packingDate;
+          const currentWorkDate = globalSettings.workDate;
           const nowISO = new Date().toISOString();
 
           if (mode === "INBOUND") {
@@ -739,17 +740,18 @@
             }
         }
 
+        // 사용자가 명시적으로 메인 드롭다운에서 선택한 값이 있으면 최우선 반영(override)되도록 수정
         const finalData = {
           barcode: code,
           gtin: parsed.gtin,
-          productName: foundStock?.productName || globalSettings.productName || "",
-          brand: foundStock?.brand || globalSettings.brand,
-          origin: parsed.origin || foundStock?.origin || globalSettings.origin,
-          storageType: foundStock?.storageType || globalSettings.storageType,
-          grade: foundStock?.grade || globalSettings.grade,
-          factoryNo: foundStock?.factoryNo || globalSettings.factoryNo,
-          supplier: foundStock?.supplier || globalSettings.supplier,
-          unitPrice: foundStock?.unitPrice || globalSettings.unitPrice,
+          productName: globalSettings.productName || foundStock?.productName || "",
+          brand: globalSettings.brand || foundStock?.brand || "",
+          origin: globalSettings.origin || parsed.origin || foundStock?.origin || "",
+          storageType: globalSettings.storageType || foundStock?.storageType || "냉장",
+          grade: globalSettings.grade || foundStock?.grade || "",
+          factoryNo: globalSettings.factoryNo || foundStock?.factoryNo || "",
+          supplier: globalSettings.supplier || foundStock?.supplier || "",
+          unitPrice: globalSettings.unitPrice || foundStock?.unitPrice || "",
           location: mode === "MOVE" ? globalSettings.moveTargetLocation : (mode === "RETURN" ? globalSettings.returnDestination : globalSettings.location),
           weight: parsed.weight || foundStock?.weight || 0,
           packingDate: parsed.date || foundStock?.packingDate || globalSettings.packingDate,
@@ -876,15 +878,19 @@
                                i.status === "ACTIVE" &&
                                ( (res.lotNumber && i.lotNumber === res.lotNumber) || (res.barcode && i.barcode === res.barcode) )
                            );
-                           let finalOrigin = res.origin;
-                           if (res.barcode) {
-                               const bc = parseBarcode(res.barcode);
-                               if (bc.origin) finalOrigin = bc.origin;
-                           }
-                           if (!finalOrigin && res.brand) {
-                               const upperBrand = res.brand.toUpperCase();
-                               const mappedKey = Object.keys(BRAND_ORIGIN_MAP).find(k => upperBrand.includes(k));
-                               if (mappedKey) finalOrigin = BRAND_ORIGIN_MAP[mappedKey];
+
+                           // AI 스캔 시에도 사용자가 수동 선택한 값을 최우선 반영하도록 수정
+                           let finalOrigin = globalSettings.origin || res.origin;
+                           if (!globalSettings.origin) { // 수동 선택값이 없을 때만 AI/바코드 정보 사용
+                               if (res.barcode) {
+                                   const bc = parseBarcode(res.barcode);
+                                   if (bc.origin) finalOrigin = bc.origin;
+                               }
+                               if (!finalOrigin && res.brand) {
+                                   const upperBrand = res.brand.toUpperCase();
+                                   const mappedKey = Object.keys(BRAND_ORIGIN_MAP).find(k => upperBrand.includes(k));
+                                   if (mappedKey) finalOrigin = BRAND_ORIGIN_MAP[mappedKey];
+                               }
                            }
 
                            if (match) {
@@ -1436,17 +1442,17 @@
                     <div className="col-span-2 text-[10px] text-slate-400 mt-1 font-mono break-all whitespace-normal leading-tight">ID: {log.barcode || log.lotNumber}</div>
                  </div>
 
-                 {/* 이력번호/비고 입력란 (직접 입력 형태) */}
+                 {/* 모바일 화면 이탈 방지를 위해 min-w-0 추가 */}
                  <div className="flex gap-2 border-t pt-2 mt-1 relative z-10" onClick={(e)=>e.stopPropagation()}>
                     <input
                        placeholder="이력번호 입력"
-                       className="flex-1 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:border-indigo-500 transition-colors text-slate-700"
+                       className="flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:border-indigo-500 transition-colors text-slate-700"
                        defaultValue={log.traceabilityNo}
                        onBlur={(e)=>updateField(log.id, 'traceabilityNo', e.target.value)}
                     />
                     <input
                        placeholder="비고 입력"
-                       className="flex-1 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:border-indigo-500 transition-colors text-slate-700"
+                       className="flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:border-indigo-500 transition-colors text-slate-700"
                        defaultValue={log.userNote}
                        onBlur={(e)=>updateField(log.id, 'userNote', e.target.value)}
                     />
