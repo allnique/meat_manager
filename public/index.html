@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>원육 매니저 V4.38 (UI/Logic Fix)</title>
+    <title>원육 매니저 V4.40 (Local Storage Opt)</title>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -434,18 +434,35 @@
       const [activeTab, setActiveTab] = useState("SCAN");
       const [masterData, setMasterData] = useState(DEFAULT_MASTER_DATA);
 
-      const [globalSettings, setGlobalSettings] = useState({
-        location: "",
-        moveTargetLocation: "",
-        grade: "", brand: "", origin: "",
-        factoryNo: "", storageType: "냉장", productName: "",
-        supplier: "", unitPrice: "",
-        workDate: getTodayString(),
-        packingDate: "",
-        returnDestination: ""
+      // LocalStorage를 활용하여 특정 기기/브라우저 내 마지막 선택값 기억 (새 기기나 다른 기기와는 공유되지 않음)
+      const [globalSettings, setGlobalSettings] = useState(() => {
+        try {
+          const saved = localStorage.getItem("meat_wms_user_settings");
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            return {
+              ...parsed,
+              workDate: getTodayString() // 앱 최초 접속 시 작업일은 무조건 오늘 날짜로 초기화
+            };
+          }
+        } catch (e) {
+          console.warn("설정 복원 실패:", e);
+        }
+        return {
+          location: "", moveTargetLocation: "", grade: "", brand: "", origin: "",
+          factoryNo: "", storageType: "냉장", productName: "", supplier: "", unitPrice: "",
+          workDate: getTodayString(), packingDate: "", returnDestination: ""
+        };
       });
 
       const [inventory, setInventory] = useState([]);
+
+      // 설정이 바뀔때마다 현재 기기(브라우저) 캐시에 업데이트
+      useEffect(() => {
+        const settingsToSave = { ...globalSettings };
+        delete settingsToSave.workDate; // 과거의 작업일이 다음 날 접속 시 복원되는 현상을 방지
+        localStorage.setItem("meat_wms_user_settings", JSON.stringify(settingsToSave));
+      }, [globalSettings]);
 
       useEffect(() => {
         const boot = async () => {
@@ -462,7 +479,7 @@
 
       useEffect(() => {
         if (!user) return;
-        const { db, doc, onSnapshot, setDoc, collection } = window.__fb;
+        const { db, doc, onSnapshot, collection } = window.__fb;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
         const configRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data");
@@ -482,9 +499,11 @@
                storageType: prev.storageType || data.storageTypes?.[0] || "냉장"
              }));
           } else {
-             setDoc(configRef, DEFAULT_MASTER_DATA);
+             // 데이터가 비어있을 경우, 강제로 초기화(덮어쓰기)하지 않고 메모리 상에서만 기본값을 유지
+             // 이로 인해 다른 기기가 로딩 속도 차이로 DB를 삭제하는 현상을 방지
+             setMasterData(DEFAULT_MASTER_DATA);
           }
-        });
+        }, (err) => console.error(err));
 
         const logsRef = collection(db, "artifacts", appId, "public", "data", "meat_wms_logs");
         const unsubLogs = onSnapshot(logsRef, (snapshot) => {
@@ -501,7 +520,7 @@
             <div className="flex items-center justify-between">
                <div className="flex items-center gap-2">
                   <div className="bg-indigo-600 p-1.5 rounded-lg shadow-sm">
-                     <span className="text-white text-xs font-black">V4.38</span>
+                     <span className="text-white text-xs font-black">V4.40</span>
                   </div>
                   <h1 className="font-bold text-lg text-slate-800 tracking-tight">원육 매니저</h1>
                </div>
@@ -740,7 +759,6 @@
             }
         }
 
-        // 사용자가 명시적으로 메인 드롭다운에서 선택한 값이 있으면 최우선 반영(override)되도록 수정
         const finalData = {
           barcode: code,
           gtin: parsed.gtin,
@@ -879,9 +897,8 @@
                                ( (res.lotNumber && i.lotNumber === res.lotNumber) || (res.barcode && i.barcode === res.barcode) )
                            );
 
-                           // AI 스캔 시에도 사용자가 수동 선택한 값을 최우선 반영하도록 수정
                            let finalOrigin = globalSettings.origin || res.origin;
-                           if (!globalSettings.origin) { // 수동 선택값이 없을 때만 AI/바코드 정보 사용
+                           if (!globalSettings.origin) {
                                if (res.barcode) {
                                    const bc = parseBarcode(res.barcode);
                                    if (bc.origin) finalOrigin = bc.origin;
@@ -1069,26 +1086,22 @@
         } catch(e) { console.error(e); }
       };
 
-      // 개별 상세 변경 로직
       const handleFullUpdate = async (updatedData) => {
          try {
             const { db, updateDoc, doc } = window.__fb;
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             const payload = cleanPayload(updatedData);
 
-            // UI 렌더링 동기화를 위한 history 데이터 강제 업데이트 처리
             const original = logs.find(l => l.id === updatedData.id);
             if (original && original.history && Array.isArray(original.history)) {
                 let updatedHistory = [...original.history];
 
-                // 입고일자 변경 시 동기화
                 if (payload.inboundDate && payload.inboundDate !== original.inboundDate && updatedHistory.length > 0) {
                     const oldTime = updatedHistory[0].date && updatedHistory[0].date.length > 10 ? updatedHistory[0].date.substring(10) : "T00:00:00.000Z";
                     updatedHistory[0].date = payload.inboundDate + oldTime;
                     updatedHistory[0].workDate = payload.inboundDate;
                 }
 
-                // 위치 변경 시 동기화
                 if (payload.location && payload.location !== original.location && updatedHistory.length > 0) {
                     const lastIdx = updatedHistory.length - 1;
                     updatedHistory[lastIdx].to = payload.location;
@@ -1127,7 +1140,6 @@
          setSelectedIds(new Set());
       };
 
-      // 상세 일괄 변경 로직
       const handleBulkFullUpdate = async () => {
          if (selectedIds.size === 0) return;
          const { db, updateDoc, doc } = window.__fb;
@@ -1138,18 +1150,15 @@
             const original = logs.find(l => l.id === id);
             let itemUpdates = { ...updates };
 
-            // UI 렌더링 동기화를 위한 history 데이터 강제 업데이트 처리
             if (original && original.history && Array.isArray(original.history)) {
                 let updatedHistory = [...original.history];
 
-                // 입고일자 변경 시 동기화
                 if (itemUpdates.inboundDate && updatedHistory.length > 0) {
                     const oldTime = updatedHistory[0].date && updatedHistory[0].date.length > 10 ? updatedHistory[0].date.substring(10) : "T00:00:00.000Z";
                     updatedHistory[0].date = itemUpdates.inboundDate + oldTime;
                     updatedHistory[0].workDate = itemUpdates.inboundDate;
                 }
 
-                // 위치 변경 시 동기화
                 if (itemUpdates.location && updatedHistory.length > 0) {
                     const lastIdx = updatedHistory.length - 1;
                     updatedHistory[lastIdx].to = itemUpdates.location;
@@ -1513,7 +1522,6 @@
                       <div className="border-t pt-2 mt-2">
                         <p className="text-xs font-bold text-slate-400 mb-2">관리자 필드</p>
                         <Select label="현재위치 이동" val={bulkForm.location} opt={masterData.locations} onChange={v=>setBulkForm({...bulkForm, location:v})} />
-                        {/* Bug Fix 1: setForm -> setBulkForm 변경 적용 */}
                         <Input label="입고일자 수정" type="date" val={bulkForm.inboundDate} onChange={v=>setBulkForm({...bulkForm, inboundDate:v})} />
                         <Input label="이동일자 수정" type="date" val={bulkForm.moveDate} onChange={v=>setBulkForm({...bulkForm, moveDate:v})} />
                       </div>
