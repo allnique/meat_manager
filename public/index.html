@@ -3,17 +3,17 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>원육 매니저 V5.1 (Production Logic)</title>
+    <title>원육 매니저 V6.0 (Stability & UX)</title>
 
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind CSS (버전 고정: 갑작스러운 최신버전 변경으로 인한 깨짐 방지) -->
+    <script src="https://cdn.tailwindcss.com/3.4.16"></script>
 
-    <!-- React & ReactDOM -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- React & ReactDOM (프로덕션 빌드 + 버전 고정: 속도 향상, 콘솔 경고 제거) -->
+    <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 
     <!-- Babel -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
 
     <!-- SheetJS (Excel) -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -190,12 +190,14 @@
     }
 
     function getSafeDate(item, field) {
-        if (item[field]) return item[field].substring(0, 10);
-        if (item.processDate) return item.processDate.substring(0, 10);
-        if (item.timestamp) {
-            const d = new Date(item.timestamp.seconds * 1000);
-            if (!isNaN(d.getTime())) return d.toISOString().substring(0,10);
+        const val = item[field];
+        if (!val) {
+            if (item.processDate) return item.processDate.substring(0, 10);
+            if (item.timestamp && item.timestamp.seconds) return new Date(item.timestamp.seconds * 1000).toISOString().substring(0,10);
+            return getTodayString();
         }
+        if (typeof val === 'string') return val.substring(0, 10);
+        if (val.seconds) return new Date(val.seconds * 1000).toISOString().substring(0, 10);
         return getTodayString();
     }
 
@@ -213,6 +215,88 @@
         const daysToAdd = storageType === "냉장" ? 179 : 719;
         d.setDate(d.getDate() + daysToAdd);
         return d.toISOString().split('T')[0];
+    }
+
+    // getExpirationDate의 역함수: 소비기한에서 보관일수를 빼 생산일(제조일자)을 역산
+    // 수입 GS1 바코드는 생산일 없이 소비기한만 담고 있어, 이 값을 제조일자로 등록하면 유통기한 자동계산이 원래 소비기한과 일치함
+    function getProductionDateFromExpiry(expiryStr, storageType) {
+        if(!expiryStr) return null;
+        const d = new Date(expiryStr);
+        if (isNaN(d.getTime())) return null;
+        const daysToSub = storageType === "냉장" ? 179 : 719;
+        d.setDate(d.getDate() - daysToSub);
+        return d.toISOString().split('T')[0];
+    }
+
+    // 다양한 날짜 표기를 YYYY-MM-DD로 정규화 (<input type="date">는 ISO만 허용)
+    // 지원: 2026-02-06 / 2026.02.06 / 2026/2/6 / 26.02.06 / 20260206 / 260206 / "2026년 2월 6일" / EU "06.03.2025"
+    function normalizeDateToISO(input) {
+        if (input === null || input === undefined) return "";
+        let s = String(input).trim();
+        if (!s) return "";
+        let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+        if (m) return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+        m = s.match(/(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?/);
+        if (m) return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+        m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+        if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+        m = s.match(/^(\d{2})(\d{2})(\d{2})$/);
+        if (m) return `20${m[1]}-${m[2]}-${m[3]}`;
+        const parts = s.split(/[.\/\-\s]+/).filter(Boolean);
+        if (parts.length === 3) {
+            let y, mo, da;
+            if (parts[0].length === 4) { y = parts[0]; mo = parts[1]; da = parts[2]; }         // YYYY.MM.DD
+            else if (parts[2].length === 4) { y = parts[2]; mo = parts[1]; da = parts[0]; }     // DD.MM.YYYY (EU)
+            else { y = "20" + parts[0].padStart(2,'0'); mo = parts[1]; da = parts[2]; }          // YY.MM.DD
+            const moN = parseInt(mo,10), daN = parseInt(da,10);
+            if (moN >= 1 && moN <= 12 && daN >= 1 && daN <= 31)
+                return `${y}-${String(moN).padStart(2,'0')}-${String(daN).padStart(2,'0')}`;
+        }
+        const d = new Date(s);
+        if (!isNaN(d.getTime())) { d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().split('T')[0]; }
+        return "";
+    }
+
+    // 중량 문자열 → kg 숫자. 유럽식 소수 콤마("22,890 Kg" = 22.890) 처리
+    function parseWeight(input) {
+        if (input === null || input === undefined) return 0;
+        let s = String(input).trim().replace(/[^0-9.,]/g, '');
+        if (!s) return 0;
+        const hasComma = s.indexOf(',') > -1, hasDot = s.indexOf('.') > -1;
+        if (hasComma && hasDot) s = s.replace(/,/g, '');       // 둘 다: 콤마=천단위 → 제거
+        else if (hasComma) s = s.replace(/,/g, '.');           // 콤마만: 유럽식 소수점 → 점
+        const n = parseFloat(s);
+        return isNaN(n) ? 0 : n;
+    }
+
+    // GS1 GTIN 국가코드 → 원산지(나라별). 14자리면 포장지시자 제외한 뒤 13자리의 앞 3자리 사용
+    function originFromGtin(gtin) {
+        if (!gtin) return "";
+        const g = String(gtin).replace(/\D/g, '');
+        if (g.length < 8) return "";
+        const g13 = g.length >= 14 ? g.slice(-13) : g;
+        const p = parseInt(g13.substr(0, 3), 10);
+        if (isNaN(p)) return "";
+        if (p === 880) return "국내산";
+        if (p >= 0 && p <= 139) return "미국산";
+        if (p >= 754 && p <= 755) return "캐나다산";
+        if (p >= 930 && p <= 939) return "호주산";
+        if (p >= 940 && p <= 949) return "뉴질랜드산";
+        if (p >= 840 && p <= 849) return "스페인산";
+        if (p >= 570 && p <= 579) return "덴마크산";
+        if (p >= 400 && p <= 440) return "독일산";
+        if (p >= 870 && p <= 879) return "네덜란드산";
+        if (p >= 300 && p <= 379) return "프랑스산";
+        if (p >= 900 && p <= 919) return "오스트리아산";
+        if (p >= 540 && p <= 549) return "벨기에산";
+        if (p === 539) return "아일랜드산";
+        if (p === 590) return "폴란드산";
+        if (p === 599) return "헝가리산";
+        if (p >= 800 && p <= 839) return "이탈리아산";
+        if (p === 780) return "칠레산";
+        if (p >= 789 && p <= 790) return "브라질산";
+        if (p === 750) return "멕시코산";
+        return "";
     }
 
     function getDDayString(expDateStr, storageType) {
@@ -246,22 +330,38 @@
       return newObj;
     }
 
+    // 입고 당시의 '원래 중량'을 복원 (현재중량 + 차감합계 - 복구합계).
+    // 강제소진/생산차감으로 현재 weight가 줄어도 통계상 입고량은 정확히 집계되도록 함.
+    function getOriginalInboundWeight(item) {
+      let w = parseFloat(item.weight) || 0;
+      if (Array.isArray(item.history)) {
+        item.history.forEach(h => {
+          if (h.type === "CONSUME" || h.type === "PARTIAL_CONSUME") w += parseFloat(h.deductedWeight) || 0;
+          else if (h.type === "RESTORE") w -= parseFloat(h.restoredWeight) || 0;
+        });
+      }
+      return w;
+    }
+
     const DEFAULT_MASTER_DATA = {
       locations: ['냉장 A창고', '냉장 B창고', '냉동 1창고', '냉동 2창고', '매장 쇼케이스', '작업장 해동고'],
-      grades: ['1++', '1+', '1등급', '2등급', '3등급', '등외', 'Prime', 'Choice', 'S', 'A'],
-      origins: ['국내산', '미국산', '호주산', '캐나다산'],
+      grades: ['등급외', '1++', '1+', '1등급', '2등급', '3등급', 'Prime', 'Choice', 'S', 'A'],
+      origins: ['국내산', '미국산', '캐나다산', '호주산', '뉴질랜드산', '스페인산', '덴마크산', '독일산', '네덜란드산', '프랑스산', '오스트리아산', '벨기에산', '아일랜드산', '폴란드산', '헝가리산', '이탈리아산', '칠레산', '브라질산', '멕시코산'],
       brands: ['횡성축협', '도드람', 'Teys', 'JBS', 'AMH', 'Excel', 'Swift', 'IBP', 'Kilcoy', 'Oakey'],
-      factories: ['101', '102', '201', '305', '423', '239', '4'],
-      productNames: ['한우 등심', '한우 안심', '돈등심', '돈삼겹', '닭가슴살', '닭다리살', '부채살(Oyster Blade)'],
+      factories: ['해당없음', '101', '102', '201', '305', '423', '239', '4'],
+      productNames: ['한우 등심', '한우 안심', '돈등심', '돈삼겹', '닭가슴살', '닭다리살', '부채살(Oyster Blade)', '설도', '우둔(Topside)', '홍두깨', '소 다짐육(파지)', '돼지 다짐육(파지)'],
       storageTypes: ['냉장', '냉동', '급속냉동'],
       returnDestinations: ['본사 반품', '폐기', '단순 반송', '업체 교환'],
       suppliers: ['구구축산', '대한유통', '해피미트', '미트박스', '직수입'],
-      cutTypes: ['슬라이스', '깍둑썰기', '통육', '분쇄(민찌)', '기타']
+      cutTypes: ['슬라이스', '깍둑썰기', '통육', '분쇄(민찌)', '기타'],
+      lossPresets: []
     };
 
     const BRAND_ORIGIN_MAP = {
         'TEYS': '호주산', 'AMH': '호주산', 'KILCOY': '호주산', 'OAKEY': '호주산', 'WMPG': '호주산',
         'SWIFT': '미국산', 'EXCEL': '미국산', 'IBP': '미국산', 'NATIONAL': '미국산', 'SHOWCASE': '미국산', 'AURORA': '미국산',
+        'LITERA': '스페인산', 'ELPOZO': '스페인산', 'INCARLOPSA': '스페인산', 'BATALLE': '스페인산',
+        'DANISH CROWN': '덴마크산', 'TICAN': '덴마크산', 'TONNIES': '독일산', 'TÖNNIES': '독일산', 'VION': '네덜란드산',
         '횡성축협': '국내산', '도드람': '국내산', '목우촌': '국내산', '한돈': '국내산', '하이포크': '국내산'
     };
 
@@ -275,7 +375,12 @@
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL}:generateContent?key=${apiKey}`;
       const payload = {
         contents: [{ role: "user", parts: [
-            { text: "Analyze this meat label image. Identify: Product Name, Weight(kg), Packing Date(YYYY-MM-DD), Origin, Grade, Factory Number, Brand, Supplier, Lot Number, Barcode(numeric). Return ONLY a valid JSON object with keys: productName, weight, packingDate, origin, grade, factoryNo, brand, supplier, lotNumber, barcode. Do not include markdown formatting." },
+            { text: `You are extracting fields from a Korean or European meat (pork/beef) box label. Return ONLY a valid JSON object (no markdown) with keys: productName, weight, packingDate, origin, grade, factoryNo, brand, supplier, lotNumber, barcode.
+- packingDate = the MANUFACTURING / PRODUCTION date. On Korean labels this is "제조일자" or "생산일". On imported labels use "Packing date" or "Freezing / Packing date" (if absent, "Slaughtering date"). Korean labels ALSO print "소비기한" or "유통기한" (use-by / expiry) — DO NOT return that; return the 제조일자 only. Never return an expiry/best-before date. Output packingDate strictly as YYYY-MM-DD.
+- weight = NET weight in kilograms as a plain decimal using a dot (e.g. 22.890). If the label uses a comma as the decimal separator (e.g. "22,890 Kg" means 22.890), convert it. Prefer Net weight over Gross weight. Digits only with one dot.
+- origin = country of origin printed on the label, in Korean form ending with "산" (e.g. 국내산, 스페인산, 덴마크산, 독일산, 네덜란드산, 미국산, 호주산).
+- barcode = the numeric human-readable string printed under the barcode, if visible.
+Use an empty string "" for any field you cannot read.` },
             { inlineData: { mimeType: "image/jpeg", data: base64Image } }
           ] }],
         generationConfig: { response_mime_type: "application/json" }
@@ -289,7 +394,8 @@
         const jsonStart = text.indexOf('{'); const jsonEnd = text.lastIndexOf('}');
         if (jsonStart === -1 || jsonEnd === -1) throw new Error("JSON 파싱 실패");
         const parsed = JSON.parse(text.substring(jsonStart, jsonEnd + 1));
-        if(parsed.weight) parsed.weight = parseFloat(String(parsed.weight).replace(/[^0-9.]/g, ''));
+        if(parsed.weight !== undefined && parsed.weight !== null && parsed.weight !== "") parsed.weight = parseWeight(parsed.weight);
+        if(parsed.packingDate) parsed.packingDate = normalizeDateToISO(parsed.packingDate);
         return parsed;
       } catch (e) { return { error: e.message }; }
     }
@@ -313,8 +419,8 @@
       const [masterData, setMasterData] = useState(DEFAULT_MASTER_DATA);
 
       const [globalSettings, setGlobalSettings] = useState({
-        location: "", moveTargetLocation: "", grade: "", brand: "", origin: "",
-        factoryNo: "", storageType: "냉장", productName: "", supplier: "", unitPrice: "",
+        location: "", moveTargetLocation: "", grade: "등급외", brand: "", origin: "",
+        factoryNo: "해당없음", storageType: "냉장", productName: "", supplier: "", unitPrice: "",
         workDate: getTodayString(), packingDate: "", returnDestination: ""
       });
 
@@ -339,12 +445,15 @@
         const { db, doc, onSnapshot, setDoc, collection } = window.__fb;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-        // 설정 데이터 동기화
         const configRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data");
         const unsubConfig = onSnapshot(configRef, (snap) => {
           if (snap.exists()) {
              const data = snap.data();
              const mergedData = { ...DEFAULT_MASTER_DATA, ...data };
+             if (!mergedData.lossPresets) mergedData.lossPresets = [];
+             // 돈육 기본값 보장: 저장된 마스터에 등급외/해당없음이 없으면 앞에 추가
+             if (!(mergedData.grades||[]).includes('등급외')) mergedData.grades = ['등급외', ...(mergedData.grades||[])];
+             if (!(mergedData.factories||[]).includes('해당없음')) mergedData.factories = ['해당없음', ...(mergedData.factories||[])];
              setMasterData(mergedData);
              setGlobalSettings(prev => ({
                ...prev,
@@ -362,14 +471,12 @@
           }
         });
 
-        // 원육 입출고 로그 동기화
         const logsRef = collection(db, "artifacts", appId, "public", "data", "meat_wms_logs");
         const unsubLogs = onSnapshot(logsRef, (snapshot) => {
           const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
           setInventory(items.sort((a,b) => (b.clientTimestamp || "").localeCompare(a.clientTimestamp || "")));
         });
 
-        // 생산 로그 동기화
         const prodLogsRef = collection(db, "artifacts", appId, "public", "data", "meat_production_logs");
         const unsubProdLogs = onSnapshot(prodLogsRef, (snapshot) => {
             const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -385,7 +492,7 @@
             <div className="flex items-center justify-between">
                <div className="flex items-center gap-2">
                   <div className="bg-indigo-600 p-1.5 rounded-lg shadow-sm">
-                     <span className="text-white text-xs font-black">V5.1</span>
+                     <span className="text-white text-xs font-black">V6.0</span>
                   </div>
                   <h1 className="font-bold text-lg text-slate-800 tracking-tight">원육 매니저</h1>
                </div>
@@ -421,7 +528,6 @@
       );
     }
 
-    // --- 0. Nav Button Component ---
     function NavButton({ label, icon, active, onClick }) {
        return (
          <button onClick={onClick} className={`flex flex-col items-center flex-1 py-1 transition-all ${active?"text-indigo-600 scale-105":"text-slate-400"}`}>
@@ -431,7 +537,7 @@
        );
     }
 
-    // --- 1.5 Production Screen (NEW) ---
+    // --- 1.5 Production Screen ---
     function ProductionScreen({ user, masterData, globalSettings, inventory, productionLogs }) {
         const [prodName, setProdName] = useState("");
         const [cutType, setCutType] = useState("");
@@ -439,11 +545,61 @@
         const [packWeight, setPackWeight] = useState("");
         const [packUnit, setPackUnit] = useState("kg");
         const [packCount, setPackCount] = useState("");
-        const [trimLoss, setTrimLoss] = useState("");
-        const [prodLoss, setProdLoss] = useState("");
+
+        const [dripLossPercent, setDripLossPercent] = useState("");
+        const [scrapLossPercent, setScrapLossPercent] = useState("");
+        const [wasteLossPercent, setWasteLossPercent] = useState("");
+
+        const [saveScrap, setSaveScrap] = useState(false);
+        const [scrapType, setScrapType] = useState("MINCE"); // "MINCE" (다짐육) | "CUBE" (큐브)
+        const [scrapSpecies, setScrapSpecies] = useState("소"); // "소" | "돼지" (다짐육 선택시)
 
         const [targetLocation, setTargetLocation] = useState("작업장 해동고");
         const [feedback, setFeedback] = useState(null);
+
+        const [prodToDelete, setProdToDelete] = useState(null);
+        const [prodToEdit, setProdToEdit] = useState(null);
+
+        const [isBriefingOpen, setIsBriefingOpen] = useState(false);
+        const [briefingText, setBriefingText] = useState("");
+
+        // 파지를 원육으로 쓸 땐 파지 재생성 비활성화
+        const isScrapEligible = !!prodName && !prodName.includes('(파지)');
+
+        const lossPresetsKey = useMemo(() => JSON.stringify(masterData.lossPresets || []), [masterData.lossPresets]);
+
+        // 파지 형태별 명칭 조합 로직 (길이 최적화)
+        const derivedScrapName = useMemo(() => {
+            if (scrapType === 'MINCE') return `${scrapSpecies} 다짐육(파지)`;
+            if (scrapType === 'CUBE') {
+                const shortName = prodName.replace(/\s*\(.*?\)\s*/g, ''); // 괄호 안 내용 삭제
+                return `${shortName} 큐브(파지)`;
+            }
+            return "파지";
+        }, [scrapType, scrapSpecies, prodName]);
+
+        useEffect(() => {
+            if (prodName && cutType) {
+                const presetList = JSON.parse(lossPresetsKey);
+                const matchedPreset = presetList.find(p => p.productName === prodName && p.cutType === cutType);
+                if (matchedPreset) {
+                    setDripLossPercent(matchedPreset.dripLoss !== undefined ? String(matchedPreset.dripLoss) : "");
+                    setScrapLossPercent(matchedPreset.scrapLoss !== undefined ? String(matchedPreset.scrapLoss) : "");
+                    setWasteLossPercent(matchedPreset.wasteLoss !== undefined ? String(matchedPreset.wasteLoss) : "");
+                }
+            }
+        }, [prodName, cutType, lossPresetsKey]);
+
+        // UX 개선: 비활성 -> 활성 전환 시에만 한 번 켜주고, 수동 설정 유지
+        const prevEligibleRef = useRef(false);
+        useEffect(() => {
+            if (isScrapEligible && !prevEligibleRef.current) {
+                setSaveScrap(true);
+            } else if (!isScrapEligible) {
+                setSaveScrap(false);
+            }
+            prevEligibleRef.current = isScrapEligible;
+        }, [isScrapEligible]);
 
         const dailyLogs = useMemo(() => {
             return productionLogs.filter(log => log.processDate === globalSettings.workDate);
@@ -462,11 +618,24 @@
             return w * multiplier * c;
         }, [packWeight, packUnit, packCount]);
 
-        const calculatedTotalDeduction = useMemo(() => {
-            const tLoss = parseFloat(trimLoss) || 0;
-            const pLoss = parseFloat(prodLoss) || 0;
-            return calculatedTotalProdWeight + tLoss + pLoss;
-        }, [calculatedTotalProdWeight, trimLoss, prodLoss]);
+        const { totalDeduction, dripLossWeight, scrapLossWeight, wasteLossWeight, totalLossPct } = useMemo(() => {
+            const prodW = calculatedTotalProdWeight;
+            const dLossPct = parseFloat(dripLossPercent) || 0;
+            const sLossPct = parseFloat(scrapLossPercent) || 0;
+            const wLossPct = parseFloat(wasteLossPercent) || 0;
+            const tLossPct = dLossPct + sLossPct + wLossPct;
+
+            let totalDed = prodW;
+            let dLossW = 0, sLossW = 0, wLossW = 0;
+
+            if (prodW > 0 && tLossPct < 100) {
+                totalDed = prodW / (1 - (tLossPct / 100));
+                dLossW = totalDed * (dLossPct / 100);
+                sLossW = totalDed * (sLossPct / 100);
+                wLossW = totalDed * (wLossPct / 100);
+            }
+            return { totalDeduction: totalDed, dripLossWeight: dLossW, scrapLossWeight: sLossW, wasteLossWeight: wLossW, totalLossPct: tLossPct };
+        }, [calculatedTotalProdWeight, dripLossPercent, scrapLossPercent, wasteLossPercent]);
 
         const handleProductionSubmit = async () => {
             if (!prodName || !cutType || !packWeight || !packCount) {
@@ -481,8 +650,18 @@
                 return;
             }
 
-            if (calculatedTotalDeduction > availableStock) {
-                setFeedback({ type: "error", msg: `선택 위치(${targetLocation})에 가용 재고가 부족합니다. (필요: ${calculatedTotalDeduction.toFixed(2)}kg / 현재: ${availableStock.toFixed(2)}kg)` });
+            if (totalDeduction > availableStock) {
+                setFeedback({ type: "error", msg: `선택 위치(${targetLocation})에 가용 재고가 부족합니다. (필요: ${totalDeduction.toFixed(2)}kg / 현재: ${availableStock.toFixed(2)}kg)` });
+                playSound("error");
+                setTimeout(() => setFeedback(null), 4000);
+                return;
+            }
+
+            const targetStock = inventory.filter(i => i.status === "ACTIVE" && i.location === targetLocation && i.productName === prodName)
+                                         .sort((a, b) => new Date(a.inboundDate || a.clientTimestamp) - new Date(b.inboundDate || b.clientTimestamp));
+
+            if (targetStock.length > 400) {
+                setFeedback({ type: "error", msg: "차감 대상 재고가 너무 많아(400개 초과) 오류가 발생할 수 있습니다." });
                 playSound("error");
                 setTimeout(() => setFeedback(null), 4000);
                 return;
@@ -492,70 +671,64 @@
             const { db, writeBatch, doc, collection, arrayUnion, serverTimestamp } = window.__fb;
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             const batch = writeBatch(db);
+            const nowISO = new Date().toISOString();
 
             try {
-                const targetStock = inventory.filter(i => i.status === "ACTIVE" && i.location === targetLocation && i.productName === prodName)
-                                             .sort((a, b) => new Date(a.inboundDate || a.clientTimestamp) - new Date(b.inboundDate || b.clientTimestamp));
-
-                let remainingToDeduct = calculatedTotalDeduction;
+                let remainingToDeduct = totalDeduction;
+                let usedItemRefs = [];
+                let usedStocksData = [];
 
                 for (const item of targetStock) {
                     if (remainingToDeduct <= 0) break;
-
                     const itemRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", item.id);
                     const currentItemWeight = parseFloat(item.weight) || 0;
+                    usedItemRefs.push(item.barcode || item.lotNumber || "수동입고건");
 
+                    let deducted = 0;
                     if (currentItemWeight <= remainingToDeduct) {
+                        deducted = currentItemWeight;
                         remainingToDeduct -= currentItemWeight;
                         batch.update(itemRef, {
-                            status: "CONSUMED",
-                            weight: 0,
-                            consumedAt: new Date().toISOString(),
-                            history: arrayUnion({
-                                type: "CONSUME",
-                                date: new Date().toISOString(),
-                                deductedWeight: currentItemWeight,
-                                workDate: globalSettings.workDate,
-                                note: `생산 투입 (${cutType})`
-                            })
+                            status: "CONSUMED", weight: 0, consumedAt: nowISO,
+                            history: arrayUnion({ type: "CONSUME", date: nowISO, deductedWeight: deducted, workDate: globalSettings.workDate, note: `생산 투입 (${cutType})` })
                         });
                     } else {
+                        deducted = remainingToDeduct;
                         batch.update(itemRef, {
                             weight: currentItemWeight - remainingToDeduct,
-                            history: arrayUnion({
-                                type: "PARTIAL_CONSUME",
-                                date: new Date().toISOString(),
-                                deductedWeight: remainingToDeduct,
-                                workDate: globalSettings.workDate,
-                                note: `생산 부분투입 (${cutType})`
-                            })
+                            history: arrayUnion({ type: "PARTIAL_CONSUME", date: nowISO, deductedWeight: deducted, workDate: globalSettings.workDate, note: `생산 부분투입 (${cutType})` })
                         });
                         remainingToDeduct = 0;
                     }
+                    usedStocksData.push({ id: item.id, deductedWeight: deducted });
+                }
+
+                let createdScrapId = null;
+                if (saveScrap && scrapLossWeight > 0) {
+                    const scrapRef = doc(collection(db, "artifacts", appId, "public", "data", "meat_wms_logs"));
+                    createdScrapId = scrapRef.id;
+                    batch.set(scrapRef, {
+                        productName: derivedScrapName,
+                        weight: scrapLossWeight, status: "ACTIVE", initialType: "INBOUND", transactionType: "INBOUND",
+                        location: targetLocation, storageType: "냉장", inboundDate: globalSettings.workDate, processDate: globalSettings.workDate,
+                        clientTimestamp: nowISO, inboundAt: nowISO, history: [{ type: "INBOUND", date: nowISO, workDate: globalSettings.workDate, location: targetLocation }],
+                        userNote: `[${prodName}] 파지 로스에서 전환됨`, traceabilityNo: `원본: ${usedItemRefs[0] || '알수없음'}`, timestamp: serverTimestamp()
+                    });
                 }
 
                 const prodLogRef = doc(collection(db, "artifacts", appId, "public", "data", "meat_production_logs"));
                 batch.set(prodLogRef, {
-                    processDate: globalSettings.workDate,
-                    productName: prodName,
-                    cutType: cutType,
-                    packWeight: parseFloat(packWeight),
-                    packUnit: packUnit,
-                    packCount: parseInt(packCount),
-                    weight: calculatedTotalProdWeight,
-                    trimLoss: parseFloat(trimLoss) || 0,
-                    prodLoss: parseFloat(prodLoss) || 0,
-                    totalDeduction: calculatedTotalDeduction,
-                    targetLocation: targetLocation,
-                    timestamp: serverTimestamp()
+                    processDate: globalSettings.workDate, productName: prodName, cutType: cutType, packWeight: parseFloat(packWeight),
+                    packUnit: packUnit, packCount: parseInt(packCount), weight: calculatedTotalProdWeight,
+                    dripLossPercent: parseFloat(dripLossPercent) || 0, scrapLossPercent: parseFloat(scrapLossPercent) || 0, wasteLossPercent: parseFloat(wasteLossPercent) || 0,
+                    dripLoss: dripLossWeight, scrapLoss: scrapLossWeight, wasteLoss: wasteLossWeight, totalDeduction: totalDeduction,
+                    scrapSaved: saveScrap, scrapTargetName: saveScrap ? derivedScrapName : null, scrapType: saveScrap ? scrapType : null, scrapSpecies: saveScrap ? scrapSpecies : null, targetLocation: targetLocation, usedStocks: usedStocksData, createdScrapId: createdScrapId, timestamp: serverTimestamp()
                 });
 
                 await batch.commit();
 
-                setPackWeight("");
-                setPackCount("");
-                setTrimLoss("");
-                setProdLoss("");
+                setPackWeight(""); setPackCount("");
+                if (isScrapEligible) setSaveScrap(true);
                 setFeedback({ type: "success", msg: "생산 등록 및 재고 차감 완료!" });
                 playSound("success");
                 setTimeout(() => setFeedback(null), 2000);
@@ -567,10 +740,153 @@
             }
         };
 
+        const handleAIAnalysis = async () => {
+            if (dailyLogs.length === 0) return alert("당일 생산 데이터가 없습니다.");
+            setIsBriefingOpen(true);
+            setBriefingText("AI가 당일 생산 데이터를 분석하고 있습니다...");
+
+            const summary = dailyLogs.map(l => {
+                const totalLossW = (parseFloat(l.dripLoss)||0) + (parseFloat(l.scrapLoss)||0) + (parseFloat(l.wasteLoss)||0);
+                const lossPct = (totalLossW / parseFloat(l.totalDeduction)) * 100 || 0;
+                return `[${l.productName}(${l.cutType})] 생산량: ${l.weight}kg, 투입량: ${l.totalDeduction}kg, 로스율: ${lossPct.toFixed(1)}% (파지로스: ${l.scrapLossPercent}%, 폐기: ${l.wasteLossPercent}%)`;
+            }).join("\n");
+
+            const prompt = `당신은 육류 가공 공장의 생산 관리자입니다. 아래는 오늘 하루의 생산 및 로스 기록입니다.
+${summary}
+
+이 데이터를 바탕으로:
+1. 각 부위/컷팅별 로스율이 적절한지 평가해주세요. (비정상적으로 로스가 높은 항목이 있다면 지적)
+2. 오입력으로 의심되는 데이터나 개선이 필요한 생산 공정이 있는지 점검해주세요.
+3. 전반적인 수율에 대한 평가와 개선 방향을 간략히 요약해주세요.
+마크다운 서식을 제외한 평문으로, 전문가처럼 단호하고 명확하게 한국어로 작성해주세요.`;
+
+            const text = await callGeminiText(prompt);
+            setBriefingText(text);
+        };
+
+        const executeDeleteProd = async () => {
+            if (!prodToDelete) return;
+            if (prodToDelete.usedStocks && prodToDelete.usedStocks.length > 400) {
+                setFeedback({ type: "error", msg: "복구 대상 재고가 400개를 초과하여 오류가 발생할 수 있습니다." });
+                return;
+            }
+
+            const { db, writeBatch, doc, arrayUnion } = window.__fb;
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const batch = writeBatch(db);
+            const nowISO = new Date().toISOString();
+            let missingStockWarning = false;
+
+            try {
+                if (prodToDelete.usedStocks && prodToDelete.usedStocks.length > 0) {
+                    for (const stock of prodToDelete.usedStocks) {
+                        const currentItem = inventory.find(i => i.id === stock.id);
+                        if (currentItem) {
+                            const itemRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", stock.id);
+                            batch.update(itemRef, {
+                                status: "ACTIVE", weight: (parseFloat(currentItem.weight) || 0) + stock.deductedWeight,
+                                history: arrayUnion({ type: "RESTORE", date: nowISO, restoredWeight: stock.deductedWeight, workDate: globalSettings.workDate, note: "생산 취소로 인한 복구" })
+                            });
+                        } else {
+                            missingStockWarning = true;
+                        }
+                    }
+                }
+
+                if (prodToDelete.createdScrapId) {
+                    const scrapRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", prodToDelete.createdScrapId);
+                    batch.delete(scrapRef);
+                }
+
+                const prodLogRef = doc(db, "artifacts", appId, "public", "data", "meat_production_logs", prodToDelete.id);
+                batch.delete(prodLogRef);
+
+                await batch.commit();
+                setProdToDelete(null);
+
+                if (missingStockWarning) {
+                    setFeedback({ type: "error", msg: "삭제 완료. 단, 일부 원육 문서가 유실되어 불완전하게 복구되었습니다." });
+                    playSound("error");
+                    setTimeout(() => setFeedback(null), 4000);
+                } else {
+                    setFeedback({ type: "success", msg: "생산 내역 삭제 및 원육 복구 완료" });
+                    playSound("delete");
+                    setTimeout(() => setFeedback(null), 2000);
+                }
+            } catch(e) {
+                setFeedback({ type: "error", msg: "삭제 오류: " + e.message });
+            }
+        };
+
+        const executeEditProd = async () => {
+            if (!prodToEdit) return;
+            if (prodToEdit.usedStocks && prodToEdit.usedStocks.length > 400) {
+                setFeedback({ type: "error", msg: "복구 대상 재고가 400개를 초과하여 오류가 발생할 수 있습니다." });
+                return;
+            }
+
+            const { db, writeBatch, doc, arrayUnion } = window.__fb;
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const batch = writeBatch(db);
+            const nowISO = new Date().toISOString();
+            let missingStockWarning = false;
+
+            try {
+                if (prodToEdit.usedStocks && prodToEdit.usedStocks.length > 0) {
+                    for (const stock of prodToEdit.usedStocks) {
+                        const currentItem = inventory.find(i => i.id === stock.id);
+                        if (currentItem) {
+                            const itemRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", stock.id);
+                            batch.update(itemRef, {
+                                status: "ACTIVE", weight: (parseFloat(currentItem.weight) || 0) + stock.deductedWeight,
+                                history: arrayUnion({ type: "RESTORE", date: nowISO, restoredWeight: stock.deductedWeight, workDate: globalSettings.workDate, note: "생산 수정을 위한 임시 복구" })
+                            });
+                        } else {
+                            missingStockWarning = true;
+                        }
+                    }
+                }
+
+                if (prodToEdit.createdScrapId) {
+                    const scrapRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", prodToEdit.createdScrapId);
+                    batch.delete(scrapRef);
+                }
+                const prodLogRef = doc(db, "artifacts", appId, "public", "data", "meat_production_logs", prodToEdit.id);
+                batch.delete(prodLogRef);
+
+                await batch.commit();
+
+                // 폼 데이터 채우기
+                setTargetLocation(prodToEdit.targetLocation || "작업장 해동고");
+                setProdName(prodToEdit.productName);
+                setCutType(prodToEdit.cutType);
+                setPackWeight(prodToEdit.packWeight);
+                setPackUnit(prodToEdit.packUnit || "kg");
+                setPackCount(prodToEdit.packCount);
+                setDripLossPercent(prodToEdit.dripLossPercent || "");
+                setScrapLossPercent(prodToEdit.scrapLossPercent || "");
+                setWasteLossPercent(prodToEdit.wasteLossPercent || "");
+                setSaveScrap(prodToEdit.scrapSaved || false);
+                setScrapType(prodToEdit.scrapType || "MINCE");
+                setScrapSpecies(prodToEdit.scrapSpecies || "소");
+
+                setProdToEdit(null);
+                if (missingStockWarning) {
+                    setFeedback({ type: "error", msg: "수정 모드: 일부 원육이 유실되었습니다. 내역 수정 후 다시 등록해주세요." });
+                } else {
+                    setFeedback({ type: "success", msg: "수정 모드: 내역을 수정 후 다시 등록해주세요." });
+                }
+                playSound("success");
+                setTimeout(() => setFeedback(null), 3000);
+            } catch(e) {
+                setFeedback({ type: "error", msg: "수정 준비 오류: " + e.message });
+            }
+        };
+
         return (
-            <div className="flex flex-col h-full relative">
+            <div className="flex flex-col h-full relative overflow-y-auto overflow-x-hidden pb-safe">
                 {feedback && (
-                  <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
+                  <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
                     <div className={`px-8 py-6 rounded-3xl shadow-2xl backdrop-blur-md flex flex-col items-center animate-slide-up ${feedback.type==="error"?"bg-red-500/90":"bg-slate-900/90"} text-white`}>
                       <span className="text-4xl mb-2">{feedback.type==="success" ? "✅" : "🚨"}</span>
                       <p className="text-xl font-bold text-center">{feedback.msg}</p>
@@ -578,7 +894,7 @@
                   </div>
                 )}
 
-                <div className="p-4 bg-white border-b border-slate-200">
+                <div className="p-4 bg-white border-b border-slate-200 shadow-sm z-10 flex-shrink-0">
                     <h2 className="font-black text-xl text-slate-800 mb-4 flex items-center gap-2">🔪 당일 생산량 등록</h2>
 
                     <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl flex flex-col gap-3 shadow-sm">
@@ -601,7 +917,7 @@
                         {prodName && (
                             <div className="text-right text-xs">
                                 <span className="text-slate-500">현재 <span className="font-bold text-indigo-600">{targetLocation}</span> 가용 재고: </span>
-                                <span className="font-black text-lg text-slate-800">{availableStock.toFixed(2)}kg</span>
+                                <span className="font-black text-lg text-slate-800">{(parseFloat(availableStock) || 0).toFixed(2)}kg</span>
                             </div>
                         )}
 
@@ -629,46 +945,110 @@
                             </div>
                         </div>
 
-                        <div className="flex gap-2">
+                        <div className="flex gap-2 relative">
                             <div className="flex-1 flex flex-col">
-                                <span className="text-[10px] font-bold text-slate-400 mb-1">정선로스 (kg)</span>
-                                <input type="number" value={trimLoss} onChange={(e)=>setTrimLoss(e.target.value)} placeholder="0.00" className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-indigo-500 text-red-500" />
+                                <span className="text-[10px] font-bold text-slate-400 mb-1">계량/해동 로스 (%)</span>
+                                <input type="number" value={dripLossPercent} onChange={(e)=>setDripLossPercent(e.target.value)} placeholder="0.0" className="bg-white border border-slate-200 rounded-lg px-2 py-2 text-sm font-bold outline-none focus:border-indigo-500 text-slate-500" />
                             </div>
                             <div className="flex-1 flex flex-col">
-                                <span className="text-[10px] font-bold text-slate-400 mb-1">생산로스 (kg)</span>
-                                <input type="number" value={prodLoss} onChange={(e)=>setProdLoss(e.target.value)} placeholder="0.00" className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:border-indigo-500 text-red-500" />
+                                <span className="text-[10px] font-bold text-slate-400 mb-1">파지 로스 (%)</span>
+                                <input type="number" value={scrapLossPercent} onChange={(e)=>setScrapLossPercent(e.target.value)} placeholder="0.0" className="bg-white border border-slate-200 rounded-lg px-2 py-2 text-sm font-bold outline-none focus:border-indigo-500 text-orange-500" />
                             </div>
+                            <div className="flex-1 flex flex-col">
+                                <span className="text-[10px] font-bold text-slate-400 mb-1">폐기 로스 (%)</span>
+                                <input type="number" value={wasteLossPercent} onChange={(e)=>setWasteLossPercent(e.target.value)} placeholder="0.0" className="bg-white border border-slate-200 rounded-lg px-2 py-2 text-sm font-bold outline-none focus:border-indigo-500 text-red-500" />
+                            </div>
+                            {masterData.lossPresets?.some(p => p.productName === prodName && p.cutType === cutType) && (
+                                <div className="absolute -top-3 right-0 bg-indigo-100 text-indigo-600 text-[8px] px-1 py-0.5 rounded font-bold animate-pulse">자동입력됨</div>
+                            )}
                         </div>
 
-                        <div className="mt-2 bg-indigo-50 p-3 rounded-xl border border-indigo-100 flex flex-col gap-1">
+                        {/* 다짐육 및 큐브 파지 생성 토글 + 버튼 박스 */}
+                        {isScrapEligible && (
+                           <div className="flex flex-col gap-2 bg-orange-50 p-3 rounded-lg border border-orange-100 mt-1 animate-fade-in">
+                              <div className="flex justify-between items-center">
+                                  <div className="flex flex-col">
+                                     <span className="text-xs font-bold text-orange-800">♻️ 발생 파지 재고 전환</span>
+                                     <span className="text-[10px] text-orange-600 font-medium">오직 '파지로스' 중량만 재고로 등록됩니다.</span>
+                                  </div>
+                                  <Toggle checked={saveScrap} onChange={setSaveScrap} />
+                              </div>
+                              {saveScrap && (
+                                  <div className="flex flex-col gap-2 bg-white/60 p-2 rounded border border-orange-200/60 mt-1 animate-slide-up">
+                                      <div className="flex justify-between items-center">
+                                          <span className="text-[10px] font-bold text-slate-500">전환 품목 형태:</span>
+                                          <div className="flex gap-2">
+                                              <button
+                                                  onClick={() => setScrapType("MINCE")}
+                                                  className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-colors ${scrapType === 'MINCE' ? 'bg-orange-500 text-white shadow-md' : 'bg-white text-orange-600 border border-orange-300'}`}>
+                                                  다짐육
+                                              </button>
+                                              <button
+                                                  onClick={() => setScrapType("CUBE")}
+                                                  className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-colors ${scrapType === 'CUBE' ? 'bg-orange-500 text-white shadow-md' : 'bg-white text-orange-600 border border-orange-300'}`}>
+                                                  큐브
+                                              </button>
+                                          </div>
+                                      </div>
+                                      {scrapType === 'MINCE' && (
+                                          <div className="flex justify-between items-center mt-1 pt-2 border-t border-orange-100/50">
+                                              <span className="text-[10px] font-bold text-slate-500">육류 종류:</span>
+                                              <div className="flex gap-2">
+                                                  <button
+                                                      onClick={() => setScrapSpecies("소")}
+                                                      className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-colors ${scrapSpecies === '소' ? 'bg-red-600 text-white shadow-md' : 'bg-white text-red-600 border border-red-200'}`}>
+                                                      소고기
+                                                  </button>
+                                                  <button
+                                                      onClick={() => setScrapSpecies("돼지")}
+                                                      className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-colors ${scrapSpecies === '돼지' ? 'bg-pink-500 text-white shadow-md' : 'bg-white text-pink-500 border border-pink-200'}`}>
+                                                      돼지고기
+                                                  </button>
+                                              </div>
+                                          </div>
+                                      )}
+                                      <div className="text-right mt-1">
+                                          <span className="text-[10px] text-slate-400">생성될 품목명: </span>
+                                          <span className="text-xs font-black text-indigo-700">{derivedScrapName}</span>
+                                      </div>
+                                  </div>
+                              )}
+                           </div>
+                        )}
+
+                        <div className="mt-2 bg-slate-100 p-3 rounded-xl border border-slate-200 flex flex-col gap-1">
                             <div className="flex justify-between text-xs text-indigo-800 font-bold">
                                 <span>순생산량 ({packCount || 0}팩)</span>
-                                <span>{calculatedTotalProdWeight.toFixed(2)} kg</span>
+                                <span>{(parseFloat(calculatedTotalProdWeight) || 0).toFixed(2)} kg</span>
                             </div>
-                            <div className="flex justify-between text-xs text-red-600 font-bold">
-                                <span>발생 로스</span>
-                                <span>{((parseFloat(trimLoss)||0) + (parseFloat(prodLoss)||0)).toFixed(2)} kg</span>
+                            <div className="flex justify-between text-[10px] text-slate-500 font-bold">
+                                <span>로스 합계 ({(parseFloat(totalLossPct) || 0).toFixed(1)}%)</span>
+                                <span>{((parseFloat(dripLossWeight) || 0) + (parseFloat(scrapLossWeight) || 0) + (parseFloat(wasteLossWeight) || 0)).toFixed(2)} kg</span>
                             </div>
-                            <div className="flex justify-between text-sm font-black text-slate-800 mt-1 pt-1 border-t border-indigo-200">
-                                <span>재고 총 차감량</span>
-                                <span>{calculatedTotalDeduction.toFixed(2)} kg</span>
+                            <div className="flex justify-between text-sm font-black text-slate-800 mt-1 pt-1 border-t border-slate-300">
+                                <span>재고 총 차감 소요량</span>
+                                <span>{(parseFloat(totalDeduction) || 0).toFixed(2)} kg</span>
                             </div>
                         </div>
 
                         <button onClick={handleProductionSubmit} className="mt-1 bg-indigo-600 hover:bg-indigo-700 active:scale-95 transition-transform text-white font-black py-3 rounded-xl shadow-lg shadow-indigo-200 flex justify-center items-center gap-2">
-                            <span>등록 및 재고 차감 실행</span>
+                            <span>등록 및 차감 실행</span>
                         </button>
                     </div>
                 </div>
 
-                <div className="flex-1 p-4 bg-slate-100 overflow-y-auto pb-safe">
-                    <h3 className="font-bold text-sm text-slate-600 mb-3">📅 {globalSettings.workDate} 생산 내역</h3>
+                <div className="p-4 bg-slate-100 flex-1 flex flex-col min-h-[300px]">
+                    <div className="flex justify-between items-center mb-3">
+                        <h3 className="font-bold text-sm text-slate-600">📅 {globalSettings.workDate} 생산 내역</h3>
+                        <button onClick={handleAIAnalysis} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-bold text-xs border border-indigo-100 shadow-sm flex items-center gap-1">✨ AI 생산/로스 분석</button>
+                    </div>
                     {dailyLogs.length === 0 ? (
                         <div className="text-center py-10 text-slate-400 text-sm font-bold bg-white rounded-xl border border-dashed border-slate-300">당일 생산 내역이 없습니다.</div>
                     ) : (
                         <div className="flex flex-col gap-2">
                             {dailyLogs.map(log => (
-                                <div key={log.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-2 animate-fade-in">
+                                <div key={log.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-2 animate-fade-in relative overflow-hidden">
+                                    {log.scrapSaved && <div className="absolute -right-6 top-3 bg-emerald-500 text-white text-[8px] font-black py-0.5 px-6 rotate-45">{log.scrapTargetName ? log.scrapTargetName.replace('(파지)','') : '파지'}생성</div>}
                                     <div className="flex justify-between items-start">
                                         <div>
                                             <div className="flex items-center gap-2 mb-1">
@@ -681,20 +1061,66 @@
                                         </div>
                                         <div className="text-right">
                                             <div className="font-black text-indigo-600 text-lg leading-none">
-                                                {parseFloat(log.weight).toFixed(2)}<span className="text-[10px] text-slate-400 font-normal ml-0.5">kg</span>
+                                                {(parseFloat(log.weight) || 0).toFixed(2)}<span className="text-[10px] text-slate-400 font-normal ml-0.5">kg</span>
                                             </div>
-                                            <div className="text-[10px] text-red-500 font-bold mt-1">로스: {((parseFloat(log.trimLoss)||0) + (parseFloat(log.prodLoss)||0)).toFixed(2)}kg</div>
+                                            <div className="text-[10px] text-red-500 font-bold mt-1">
+                                                로스: {((parseFloat(log.dripLoss)||0) + (parseFloat(log.scrapLoss)||parseFloat(log.trimLoss)||0) + (parseFloat(log.wasteLoss)||parseFloat(log.prodLoss)||0)).toFixed(2)}kg
+                                            </div>
                                         </div>
                                     </div>
                                     <div className="flex justify-between items-center border-t border-slate-100 pt-2 mt-1">
-                                        <span className="text-[10px] text-slate-400 font-mono">{log.timestamp ? formatTime(new Date(log.timestamp.seconds * 1000).toISOString()) : "방금 전"}</span>
-                                        <span className="text-xs font-bold text-slate-600">총 차감: {parseFloat(log.totalDeduction).toFixed(2)}kg</span>
+                                        <div className="flex flex-col">
+                                            <span className="text-[10px] text-slate-400 font-mono">{log.timestamp ? formatTime(new Date(log.timestamp.seconds * 1000).toISOString()) : "방금 전"}</span>
+                                            <span className="text-xs font-bold text-slate-600 mt-0.5">총 차감: {(parseFloat(log.totalDeduction) || 0).toFixed(2)}kg</span>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <button onClick={()=>setProdToEdit(log)} className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-[10px] font-bold hover:bg-slate-200">✏️ 수정</button>
+                                            <button onClick={()=>setProdToDelete(log)} className="bg-red-50 text-red-500 px-2 py-1 rounded text-[10px] font-bold hover:bg-red-100">🗑 취소</button>
+                                        </div>
                                     </div>
                                 </div>
                             ))}
                         </div>
                     )}
                 </div>
+
+                {prodToDelete && (
+                    <div className="fixed inset-0 z-[99] bg-black/60 flex items-center justify-center p-4 animate-pulse-red">
+                        <div className="bg-white w-full max-w-xs rounded-2xl p-6 shadow-2xl animate-fade-in text-center">
+                        <div className="text-4xl mb-4">🗑</div>
+                        <h3 className="font-bold text-lg text-slate-800 mb-2">생산 내역 삭제</h3>
+                        <p className="text-sm text-slate-500 mb-6">생산 내역을 삭제하고 차감된 원육 재고를 정상 복구하시겠습니까?</p>
+                        <div className="flex gap-3">
+                            <button onClick={()=>setProdToDelete(null)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-600">닫기</button>
+                            <button onClick={executeDeleteProd} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-bold shadow-lg shadow-red-200">삭제복구</button>
+                        </div>
+                        </div>
+                    </div>
+                )}
+
+                {prodToEdit && (
+                    <div className="fixed inset-0 z-[99] bg-black/60 flex items-center justify-center p-4">
+                        <div className="bg-white w-full max-w-xs rounded-2xl p-6 shadow-2xl animate-fade-in text-center">
+                        <div className="text-4xl mb-4">✏️</div>
+                        <h3 className="font-bold text-lg text-slate-800 mb-2">생산 내역 수정</h3>
+                        <p className="text-sm text-slate-500 mb-6">재고 정합성을 위해 기존 생산 내역을 취소(복구)하고, 입력창으로 데이터를 다시 불러옵니다. 진행할까요?</p>
+                        <div className="flex gap-3">
+                            <button onClick={()=>setProdToEdit(null)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-600">닫기</button>
+                            <button onClick={executeEditProd} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-indigo-200">수정하기</button>
+                        </div>
+                        </div>
+                    </div>
+                )}
+
+                {isBriefingOpen && (
+                    <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-4">
+                        <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
+                            <h3 className="font-bold text-lg mb-2">✨ AI 생산/로스 분석</h3>
+                            <div className="text-sm text-slate-600 mb-4 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">{briefingText}</div>
+                            <button onClick={()=>setIsBriefingOpen(false)} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold">닫기</button>
+                        </div>
+                    </div>
+                )}
             </div>
         );
     }
@@ -723,7 +1149,7 @@
           const nowISO = new Date().toISOString();
 
           if (mode === "INBOUND") {
-             const duplicate = inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode && i.transactionType !== "RETURN");
+             const duplicate = safeData.barcode && inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode && i.transactionType !== "RETURN");
              if(duplicate && !safeData.id) {
                 setFeedback({ type: "error", msg: "🚨 이미 등록된 바코드입니다!" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return;
              }
@@ -760,14 +1186,69 @@
         } catch(e) { console.error(e); setFeedback({type:"error", msg: "오류: " + e.message}); playSound("error"); }
       };
 
+      // 바코드 파서: (a) GS1-128 AI 파싱, (b) 국내산 농협 고정형(23자리), (c) 순수 GTIN
+      // res.dateIsExpiry=true 이면 date가 소비기한(생산일 역산 필요), false 이면 생산일/제조일자
       const parseBarcode = (raw) => {
-        let code = raw.replace(/[()]/g,""); let res = { gtin:"", weight:0, date:null, lot:"", origin:"" };
-        if (code.startsWith("01")) { res.gtin = code.substr(2,14); code = code.substr(16); } else if (code.length >= 14 && (code.startsWith("9") || code.startsWith("1") || code.startsWith("0"))) { res.gtin = code.substr(0,14); code = code.substr(14); }
-        if (res.gtin) { const prefix = parseInt(res.gtin.substr(0, 3)); if (prefix === 880) res.origin = "국내산"; else if (res.gtin.startsWith("9")) res.origin = "호주산"; else if (prefix >= 0 && prefix <= 139) res.origin = "미국산"; }
-        let wIdx = code.indexOf("3102"); if (wIdx > -1) { let wStr = code.substr(wIdx+4, 6); if(wStr.length === 6 && !isNaN(wStr)) res.weight = parseFloat(wStr) / 100; }
-        const dateAIs = ["13", "15", "11"];
-        for(let ai of dateAIs) { let idx = code.indexOf(ai); if(idx > -1 && idx + 2 + 6 <= code.length) { let dStr = code.substr(idx+2, 6); let y = parseInt(dStr.substr(0,2)); if (y >= 20 && y <= 30) { res.date = `20${dStr.substr(0,2)}-${dStr.substr(2,2)}-${dStr.substr(4,2)}`; break; } } }
-        let lotIdx = code.indexOf("21"); if (lotIdx === -1) lotIdx = code.indexOf("10"); if (lotIdx > -1) res.lot = code.substr(lotIdx+2, 12);
+        let res = { gtin:"", weight:0, date:null, dateIsExpiry:false, lot:"", origin:"" };
+        if (!raw) return res;
+        let s = String(raw).trim().replace(/^\][A-Za-z]\d/, ""); // 앞 AIM 심볼로지 식별자(]C1 등) 제거
+        const GS = String.fromCharCode(29); // FNC1 구분자
+        const isGs1 = s.indexOf("(") > -1 || s.indexOf(GS) > -1 || /^(01|02)\d/.test(s);
+
+        const setDate = (val6, isExpiry) => {
+          if (!/^\d{6}$/.test(val6)) return;
+          const y = parseInt(val6.substr(0,2),10), mo = parseInt(val6.substr(2,2),10), da = parseInt(val6.substr(4,2),10);
+          if (y < 20 || y > 49 || mo < 1 || mo > 12 || da < 1 || da > 31) return;
+          if (isExpiry && res.date && !res.dateIsExpiry) return; // 생산일이 이미 있으면 소비기한으로 덮지 않음
+          res.date = `20${val6.substr(0,2)}-${val6.substr(2,2)}-${val6.substr(4,2)}`;
+          res.dateIsExpiry = !!isExpiry;
+        };
+        const applyAI = (ai, val) => {
+          if (ai === "01" || ai === "02") { if(!res.gtin) res.gtin = val.replace(/\D/g,"").substr(0,14); }
+          else if (ai.length === 4 && ai.substr(0,3) === "310") { const dec = parseInt(ai[3],10); const n = parseInt(val,10); if(!isNaN(n)) res.weight = n / Math.pow(10, dec); } // 순중량 kg
+          else if (ai === "11" || ai === "13") setDate((val||"").substr(0,6), false); // 생산/포장일
+          else if (ai === "15" || ai === "17") setDate((val||"").substr(0,6), true);  // 소비기한/만료일
+          else if (ai === "10") res.lot = val;
+          else if (ai === "21" && !res.lot) res.lot = val;
+        };
+
+        if (isGs1) {
+          if (s.indexOf("(") > -1) {
+            const re = /\((\d{2,4})\)([^(]*)/g; let m;
+            while ((m = re.exec(s)) !== null) applyAI(m[1], m[2].replace(/[^0-9A-Za-z]/g,""));
+          } else {
+            const FIXED = {"00":18,"01":14,"02":14,"11":6,"12":6,"13":6,"15":6,"16":6,"17":6,"20":2};
+            let i = 0; const L = s.length; let guard = 0;
+            while (i < L && guard++ < 50) {
+              if (s[i] === GS) { i++; continue; }
+              let ai, dataLen, variable = false;
+              if (/^3[1-6]$/.test(s.substr(i,2)) && /^\d$/.test(s[i+2]||"") && /^\d$/.test(s[i+3]||"")) { ai = s.substr(i,4); dataLen = 6; i += 4; }
+              else { ai = s.substr(i,2); i += 2; if (ai in FIXED) dataLen = FIXED[ai]; else variable = true; }
+              let val;
+              if (variable) { let g = s.indexOf(GS, i); if (g === -1) g = L; val = s.substring(i, g); i = g; }
+              else { val = s.substr(i, dataLen); i += dataLen; }
+              applyAI(ai, val);
+            }
+          }
+          if (res.gtin) res.origin = originFromGtin(res.gtin);
+          return res;
+        }
+
+        // 국내산 농협 고정형: 전부 숫자, 길이 20~24, 앞6=YYMMDD(제조일자), 뒤3=중량×10, 7~10=순번
+        if (/^\d{20,24}$/.test(s)) {
+          const d6 = s.substr(0,6);
+          const y = parseInt(d6.substr(0,2),10), mo = parseInt(d6.substr(2,2),10), da = parseInt(d6.substr(4,2),10);
+          const w3 = parseInt(s.substr(-3),10);
+          if (y >= 20 && y <= 49 && mo >= 1 && mo <= 12 && da >= 1 && da <= 31 && !isNaN(w3) && w3 > 0 && w3 < 1000) {
+            res.date = `20${d6.substr(0,2)}-${d6.substr(2,2)}-${d6.substr(4,2)}`;
+            res.weight = w3 / 10;
+            res.lot = s.substr(6,4); // 순번
+            return res;
+          }
+        }
+
+        // 순수 GTIN(13~14자리) → 원산지만
+        if (/^\d{13,14}$/.test(s)) { res.gtin = s; res.origin = originFromGtin(s); }
         return res;
       };
 
@@ -780,14 +1261,19 @@
             if (!foundStock) { setFeedback({ type: "error", msg: "🚨 재고에 없는 상품입니다." }); playSound("error"); setTimeout(() => setFeedback(null), 3000); inputRef.current?.focus(); return; }
         }
 
+        const stType = globalSettings.storageType || foundStock?.storageType || "냉장";
+        // 수입 GS1 바코드는 소비기한만 담고 있으므로 보관일수만큼 역산해 생산일(제조일자)로 등록 → 유통기한 자동계산이 소비기한과 일치
+        let pDate = parsed.date;
+        if (parsed.date && parsed.dateIsExpiry) pDate = getProductionDateFromExpiry(parsed.date, stType) || parsed.date;
+
         const finalData = {
           barcode: code, gtin: parsed.gtin,
           productName: globalSettings.productName || foundStock?.productName || "", brand: globalSettings.brand || foundStock?.brand || "",
-          origin: globalSettings.origin || parsed.origin || foundStock?.origin || "", storageType: globalSettings.storageType || foundStock?.storageType || "냉장",
+          origin: globalSettings.origin || parsed.origin || foundStock?.origin || "", storageType: stType,
           grade: globalSettings.grade || foundStock?.grade || "", factoryNo: globalSettings.factoryNo || foundStock?.factoryNo || "", supplier: globalSettings.supplier || foundStock?.supplier || "",
           unitPrice: globalSettings.unitPrice || foundStock?.unitPrice || "",
           location: mode === "MOVE" ? globalSettings.moveTargetLocation : (mode === "RETURN" ? globalSettings.returnDestination : globalSettings.location),
-          weight: parsed.weight || foundStock?.weight || 0, packingDate: parsed.date || foundStock?.packingDate || globalSettings.packingDate,
+          weight: parsed.weight || foundStock?.weight || 0, packingDate: pDate || foundStock?.packingDate || globalSettings.packingDate,
           lotNumber: parsed.lot || foundStock?.lotNumber || "", transactionType: mode, userNote: foundStock?.userNote || ""
         };
 
@@ -848,7 +1334,7 @@
             <form onSubmit={handleScan} className="flex-1 relative">
               <textarea ref={inputRef} value={inputBarcode} onChange={e=>setInputBarcode(e.target.value)} onKeyDown={(e) => { if(e.key === 'Enter') { e.preventDefault(); handleScan(e); } }}
                 className={`w-full py-3 pl-4 pr-4 rounded-xl border-2 shadow-sm text-lg font-bold outline-none transition-all resize-none ${mode==="RETURN" ? "border-orange-200 focus:border-orange-500" : mode==="MOVE" ? "border-blue-200 focus:border-blue-500" : "border-indigo-200 focus:border-indigo-500"}`}
-                style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }} placeholder={mode==="MOVE" ? "이동할 상품 스캔" : mode==="RETURN" ? "반품할 상품 스캔" : "신규 입고 스캔"} autoFocus inputMode="none" rows={2} />
+                style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }} placeholder={mode==="MOVE" ? "이동할 상품 스캔" : mode==="RETURN" ? "반품할 상품 스캔" : "신규 입고 스캔"} inputMode="text" rows={2} />
             </form>
             <button onClick={()=>fileInputRef.current?.click()} className="bg-slate-800 text-white w-20 rounded-xl shadow-lg flex flex-col items-center justify-center hover:bg-slate-700 active:scale-95 transition-all">
               <span className="text-xl">📸</span><span className="text-[10px] font-black text-indigo-300">AI</span>
@@ -871,8 +1357,24 @@
                            }
                            if (match) {
                                if (mode === "INBOUND") { setFeedback({ type: "error", msg: "🚨 이미 등록된 상품입니다." }); playSound("error"); setTimeout(() => setFeedback(null), 3000); setModalData({ ...match, transactionType: mode }); }
-                               else { setModalData({ ...match, ...res, transactionType: mode }); }
-                           } else { setModalData({ ...globalSettings, ...res, origin: finalOrigin || globalSettings.origin, transactionType: mode }); }
+                               else { setModalData({ ...res, ...match, transactionType: mode }); } // 기존 재고 정보 우선
+                           } else {
+                               // 미리 설정한 드롭다운(부위명·브랜드·등급·공장·거래처·위치·보관)은 유지하고, OCR은 비어있을 때만 채움
+                               setModalData({
+                                   ...globalSettings, ...res,
+                                   productName: globalSettings.productName || res.productName || "",
+                                   brand: globalSettings.brand || res.brand || "",
+                                   grade: globalSettings.grade || res.grade || "",
+                                   factoryNo: globalSettings.factoryNo || res.factoryNo || "",
+                                   supplier: globalSettings.supplier || res.supplier || "",
+                                   location: globalSettings.location || "",
+                                   storageType: globalSettings.storageType || "냉장",
+                                   origin: finalOrigin || globalSettings.origin || "",
+                                   weight: res.weight || 0,
+                                   packingDate: res.packingDate || globalSettings.packingDate || "",
+                                   transactionType: mode
+                               });
+                           }
                            setIsModalOpen(true);
                         } else if(res && res.error) { setFeedback({type:"error", msg: res.error}); playSound("error"); setTimeout(()=>setFeedback(null), 4000); }
                     }
@@ -889,7 +1391,7 @@
                     <p className="text-xs text-slate-500">Lot: {lastLog.lotNumber || "-"}</p>
                  </div>
                  <div className="text-right">
-                    <span className="text-2xl font-black text-slate-700 block">{lastLog.weight}kg</span>
+                    <span className="text-2xl font-black text-slate-700 block">{(parseFloat(lastLog.weight) || 0).toFixed(2)}kg</span>
                     {lastLog.unitPrice && <span className="text-xs text-slate-400">@{lastLog.unitPrice}원</span>}
                  </div>
                </div>
@@ -925,9 +1427,10 @@
       const [selectedIds, setSelectedIds] = useState(new Set());
       const [filterType, setFilterType] = useState("ALL");
       const [isBriefingOpen, setIsBriefingOpen] = useState(false);
+      const [briefingTitle, setBriefingTitle] = useState("✨ 경영 분석 리포트");
       const [briefingText, setBriefingText] = useState("");
       const [deleteModalTarget, setDeleteModalTarget] = useState(null);
-      const [bulkActionTarget, setBulkActionTarget] = useState(null); // 과거 데이터 강제 처리 모달 상태
+      const [bulkActionTarget, setBulkActionTarget] = useState(null);
       const [isStockView, setIsStockView] = useState(false);
       const [stockDate, setStockDate] = useState(getTodayString());
       const [bulkEditField, setBulkEditField] = useState(null);
@@ -936,6 +1439,7 @@
       const [quickEdit, setQuickEdit] = useState(null);
       const [locFilter, setLocFilter] = useState("ALL");
       const [prodFilter, setProdFilter] = useState("ALL");
+      const [bulkInputValue, setBulkInputValue] = useState("");
 
       const setDateRange = (range) => {
          const end = new Date(); const start = new Date();
@@ -972,7 +1476,7 @@
              if (iDate > stockDate) return false;
              if (i.status === "ACTIVE") return true;
              if (i.status === "RETURNED" && getSafeDate(i, 'returnDate') > stockDate) return true;
-             if (i.status === "CONSUMED" && getSafeDate(i, 'consumedAt') > stockDate) return true; // 소비 전 재고
+             if (i.status === "CONSUMED" && getSafeDate(i, 'consumedAt') > stockDate) return true;
              return false;
          });
          const locs = {};
@@ -1009,9 +1513,8 @@
             const payload = cleanPayload(updatedData);
             const original = logs.find(l => l.id === updatedData.id);
             if (original && original.history && Array.isArray(original.history)) {
-                let updatedHistory = original.history.map(h => ({...h})); // 얕은 복사로 인한 상태 변형 방지
+                let updatedHistory = original.history.map(h => ({...h}));
 
-                // 입고일자 동기화
                 if (payload.inboundDate !== undefined && payload.inboundDate !== original.inboundDate && updatedHistory.length > 0) {
                     if (updatedHistory[0].type === "INBOUND") {
                         const oldTime = updatedHistory[0].date && updatedHistory[0].date.length > 10 ? updatedHistory[0].date.substring(10) : "T00:00:00.000Z";
@@ -1020,14 +1523,12 @@
                     }
                 }
 
-                // 위치 변경 동기화
                 if (payload.location !== undefined && payload.location !== original.location && updatedHistory.length > 0) {
                     const lastIdx = updatedHistory.length - 1;
                     updatedHistory[lastIdx].to = payload.location;
                     updatedHistory[lastIdx].location = payload.location;
                 }
 
-                // 이동일자 동기화
                 if (payload.moveDate !== undefined && payload.moveDate !== original.moveDate && updatedHistory.length > 0) {
                     let lastMoveIdx = -1;
                     for (let i = updatedHistory.length - 1; i >= 0; i--) {
@@ -1053,7 +1554,6 @@
             const { db, deleteDoc, doc } = window.__fb; const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             await deleteDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", deleteModalTarget));
             setDeleteModalTarget(null);
-            alert("삭제되었습니다.");
             playSound("delete");
          } catch(e) { alert("삭제 실패: " + e.message); }
       };
@@ -1070,7 +1570,6 @@
                   batch.delete(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id));
                });
                await batch.commit();
-               alert("삭제 완료되었습니다.");
                playSound("delete");
             } else if (bulkActionTarget === "CONSUME") {
                Array.from(selectedIds).forEach(id => {
@@ -1093,14 +1592,12 @@
                   }
                });
                await batch.commit();
-               alert("소진 처리 완료되었습니다.");
                playSound("success");
             } else if (bulkActionTarget === "RESTORE") {
                Array.from(selectedIds).forEach(id => {
                   const itemRef = doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id);
                   const original = logs.find(l => l.id === id);
                   if (original.status === "CONSUMED") {
-                     // 가장 마지막에 기록된 차감 이벤트를 역탐색하여 복구할 중량 확인
                      const consumeEvent = [...(original.history || [])].reverse().find(h => h.type === "CONSUME" || h.type === "PARTIAL_CONSUME");
                      const weightToRestore = consumeEvent ? (parseFloat(consumeEvent.deductedWeight) || 0) : 0;
 
@@ -1120,7 +1617,6 @@
                   }
                });
                await batch.commit();
-               alert("정상적으로 복구되었습니다.");
                playSound("success");
             }
             setBulkActionTarget(null);
@@ -1132,7 +1628,7 @@
          if (selectedIds.size === 0 || !bulkEditField || !val) return;
          const { db, updateDoc, doc } = window.__fb; const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
          const promises = Array.from(selectedIds).map(id => updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), { [bulkEditField]: val }) );
-         await Promise.all(promises); alert("일괄 입력 완료"); setBulkEditField(null); setSelectedIds(new Set());
+         await Promise.all(promises); setBulkEditField(null); setSelectedIds(new Set());
       };
 
       const handleBulkFullUpdate = async () => {
@@ -1142,7 +1638,7 @@
          const promises = Array.from(selectedIds).map(id => {
             const original = logs.find(l => l.id === id); let itemUpdates = { ...updates };
             if (original && original.history && Array.isArray(original.history)) {
-                let updatedHistory = original.history.map(h => ({...h})); // 얕은 복사 방지
+                let updatedHistory = original.history.map(h => ({...h}));
 
                 if (itemUpdates.inboundDate !== undefined && itemUpdates.inboundDate !== original.inboundDate && updatedHistory.length > 0) {
                     if (updatedHistory[0].type === "INBOUND") {
@@ -1174,19 +1670,21 @@
             }
             return updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", id), itemUpdates);
          });
-         await Promise.all(promises); alert("상세 일괄 변경 완료"); setBulkEditField(null); setBulkForm({}); setSelectedIds(new Set());
+         await Promise.all(promises); setBulkEditField(null); setBulkForm({}); setSelectedIds(new Set());
       };
 
       const handleBriefing = async () => {
-         if(logs.length===0) return alert("데이터 없음");
-         setIsBriefingOpen(true); setBriefingText("분석중...");
-         const summary = logs.map(l => `${l.productName} ${l.weight}kg`).join(", ");
+         if(logs.length===0) return;
+         setIsBriefingOpen(true);
+         setBriefingTitle("✨ 경영 분석 리포트");
+         setBriefingText("분석중...");
+         const summary = logs.map(l => `${l.productName} ${(parseFloat(l.weight)||0).toFixed(2)}kg`).join(", ");
          const text = await callGeminiText(`이 원육 재고 데이터를 바탕으로 관리자 브리핑을 작성해주세요. 총 중량과 주요 품목별 비중을 분석하고, 한국어로 자연스럽게 작성해주세요. 마크다운 서식은 제외하고 텍스트로만 정리해주세요. 데이터: ${summary}`);
          setBriefingText(text);
       };
 
       const handleExcelExport = () => {
-         if(inventory.length === 0) return alert("데이터가 없습니다.");
+         if(inventory.length === 0) return;
          const ws = XLSX.utils.json_to_sheet(inventory.map(i => ({
            "상태": i.status, "구분": i.transactionType, "작업일": i.processDate, "입고일": i.inboundDate || i.processDate,
            "이동일": i.moveDate || "-", "반품일": i.returnDate || "-", "품명": i.productName, "중량(kg)": i.weight,
@@ -1201,14 +1699,14 @@
          return (
             <div className="flex flex-col h-full bg-slate-100 p-4 overflow-y-auto pb-safe">
                <div className="flex justify-between items-center mb-4 bg-white p-4 rounded-xl shadow-sm">
-                  <div>
-                      <h2 className="text-xl font-bold text-slate-800">🏢 창고별 재고 현황</h2>
-                      <div className="flex items-center gap-2 mt-1">
-                          <span className="text-xs text-slate-500">기준일자:</span>
-                          <input type="date" value={stockDate} onChange={e=>setStockDate(e.target.value)} className="bg-slate-100 text-sm font-bold rounded px-2 py-1 outline-none" />
-                      </div>
-                  </div>
-                  <button onClick={()=>setIsStockView(false)} className="bg-slate-100 px-4 py-2 rounded-lg font-bold text-sm text-slate-600">닫기</button>
+                 <div>
+                     <h2 className="text-xl font-bold text-slate-800">🏢 창고별 재고 현황</h2>
+                     <div className="flex items-center gap-2 mt-1">
+                         <span className="text-xs text-slate-500">기준일자:</span>
+                         <input type="date" value={stockDate} onChange={e=>setStockDate(e.target.value)} className="bg-slate-100 text-sm font-bold rounded px-2 py-1 outline-none" />
+                     </div>
+                 </div>
+                 <button onClick={()=>setIsStockView(false)} className="bg-slate-100 px-4 py-2 rounded-lg font-bold text-sm text-slate-600">닫기</button>
                </div>
                <div className="space-y-4 mt-2">
                   {Object.entries(stockByLoc).map(([loc, data]) => (
@@ -1216,17 +1714,17 @@
                         <div className="flex justify-between items-center mb-3 border-b border-slate-100 pb-2">
                            <h3 className="font-bold text-lg text-indigo-700">{loc}</h3>
                            <div className="text-right">
-                              <div className="text-2xl font-black text-slate-800">{data.weight.toFixed(2)}<span className="text-sm text-slate-400 font-normal">kg</span></div>
+                              <div className="text-2xl font-black text-slate-800">{(parseFloat(data.weight) || 0).toFixed(2)}<span className="text-sm text-slate-400 font-normal">kg</span></div>
                               <div className="text-xs text-slate-400 font-bold">유효 {data.count}박스 {data.zeroCount > 0 && `/ 소진 ${data.zeroCount}박스`}</div>
                            </div>
                         </div>
                         <div className="space-y-2">
                            {Object.entries(data.items).map(([pName, pData]) => (
                               <div key={pName} className="flex justify-between text-sm text-slate-600">
-                                  <span>{pName}</span>
-                                  <span className="font-bold">
-                                    {pData.w.toFixed(2)}kg <span className="text-xs text-slate-400">({pData.c}{pData.zc > 0 ? `/${pData.zc}` : ''})</span>
-                                  </span>
+                                 <span>{pName}</span>
+                                 <span className="font-bold">
+                                   {(parseFloat(pData.w) || 0).toFixed(2)}kg <span className="text-xs text-slate-400">({pData.c}{pData.zc > 0 ? `/${pData.zc}` : ''})</span>
+                                 </span>
                               </div>
                            ))}
                         </div>
@@ -1265,11 +1763,11 @@
             </div>
             <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-xl flex justify-between items-center shadow-sm">
               <span className="text-indigo-800 font-bold text-xs flex items-center gap-1">
-                  <span>📊</span>
-                  {filterType==="ALL"?"전체":filterType==="INBOUND"?"입고":filterType==="MOVE"?"이동":filterType==="CONSUME"?"소진":"반품"} 합계
+                 <span>📊</span>
+                 {filterType==="ALL"?"전체":filterType==="INBOUND"?"입고":filterType==="MOVE"?"이동":filterType==="CONSUME"?"소진":"반품"} 합계
               </span>
               <div className="text-right">
-                 <span className="text-indigo-900 font-black text-lg block leading-none">{summaryStats.weight.toFixed(2)}<span className="text-xs font-normal ml-0.5">kg</span></span>
+                 <span className="text-indigo-900 font-black text-lg block leading-none">{(parseFloat(summaryStats.weight) || 0).toFixed(2)}<span className="text-xs font-normal ml-0.5">kg</span></span>
                  <span className="text-[10px] text-indigo-400 font-bold">유효 {summaryStats.activeCount}건 / 소진 {summaryStats.consumedCount}건</span>
               </div>
             </div>
@@ -1313,9 +1811,9 @@
                    <div className="text-xs">상세 변경 팝업 대기중...</div>
                 ) : (
                    <div className="flex gap-2">
-                      <input placeholder="일괄 입력값..." className="flex-1 text-slate-800 rounded px-2 py-1.5 text-sm outline-none" onKeyDown={(e)=>{if(e.key==='Enter') handleBatchInput(e.target.value)}} />
-                      <button onClick={(e)=>handleBatchInput(e.target.previousSibling.value)} className="bg-white text-indigo-600 font-bold px-3 rounded text-xs">확인</button>
-                      <button onClick={()=>setBulkEditField(null)} className="text-white text-xs px-2">취소</button>
+                      <input value={bulkInputValue} onChange={(e)=>setBulkInputValue(e.target.value)} placeholder="일괄 입력값..." className="flex-1 text-slate-800 rounded px-2 py-1.5 text-sm outline-none" onKeyDown={(e)=>{if(e.key==='Enter'){ handleBatchInput(bulkInputValue); setBulkInputValue(""); }}} />
+                      <button onClick={()=>{ handleBatchInput(bulkInputValue); setBulkInputValue(""); }} className="bg-white text-indigo-600 font-bold px-3 rounded text-xs">확인</button>
+                      <button onClick={()=>{ setBulkEditField(null); setBulkInputValue(""); }} className="text-white text-xs px-2">취소</button>
                    </div>
                 )}
              </div>
@@ -1348,7 +1846,7 @@
                      <span className="font-bold text-slate-800">{log.productName}</span>
                    </div>
                    <div className="text-right">
-                      <span className={`font-black text-lg block ${log.status==="CONSUMED" ? "text-slate-500 line-through" : "text-indigo-600"}`}>{log.weight.toFixed(2)}kg</span>
+                      <span className={`font-black text-lg block ${log.status==="CONSUMED" ? "text-slate-500 line-through" : "text-indigo-600"}`}>{(parseFloat(log.weight) || 0).toFixed(2)}kg</span>
                       {log.unitPrice && <span className="text-xs text-slate-400">@{log.unitPrice}</span>}
                    </div>
                  </div>
@@ -1414,7 +1912,7 @@
                  </div>
                  <div className="flex justify-between items-center pt-2 border-t border-slate-50 mt-1 relative z-10">
                     <button onClick={(e)=>{e.stopPropagation(); setEditingItem(log);}} className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">✏️ 전체 수정</button>
-                    <button onClick={(e)=>{ e.stopPropagation(); playSound("delete"); setDeleteModalTarget(log.id); }} className="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">🗑 삭제</button>
+                    <button onClick={(e)=>{ e.stopPropagation(); setDeleteModalTarget(log.id); }} className="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">🗑 삭제</button>
                  </div>
                </div>
             )})}
@@ -1485,7 +1983,7 @@
           {isBriefingOpen && (
              <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
                 <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
-                   <h3 className="font-bold text-lg mb-2">✨ 경영 분석 리포트</h3>
+                   <h3 className="font-bold text-lg mb-2">{briefingTitle}</h3>
                    <div className="text-sm text-slate-600 mb-4 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">{briefingText}</div>
                    <button onClick={()=>setIsBriefingOpen(false)} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold">닫기</button>
                 </div>
@@ -1500,6 +1998,7 @@
        const [currentDate, setCurrentDate] = useState(new Date());
        const [viewMode, setViewMode] = useState("MONTH");
        const [isBriefingOpen, setIsBriefingOpen] = useState(false);
+       const [briefingTitle, setBriefingTitle] = useState("✨ 경영 분석 리포트");
        const [briefingText, setBriefingText] = useState("");
 
        const moveDate = (dir) => { const d = new Date(currentDate); if (viewMode === "MONTH") d.setMonth(d.getMonth() + dir); else d.setFullYear(d.getFullYear() + dir); setCurrentDate(d); };
@@ -1524,9 +2023,9 @@
        }, [productionLogs, currentDate, viewMode]);
 
        const stats = useMemo(() => {
-         const totalInbound = filteredItems.filter(i => i.initialType === "INBOUND").reduce((a,b) => a + (parseFloat(b.weight)||0), 0);
+         const totalInbound = filteredItems.filter(i => i.initialType === "INBOUND").reduce((a,b) => a + getOriginalInboundWeight(b), 0);
          const totalProduction = filteredProduction.reduce((a,b) => a + (parseFloat(b.weight)||0), 0); // 순생산량 합산
-         const totalLoss = filteredProduction.reduce((a,b) => a + (parseFloat(b.trimLoss)||0) + (parseFloat(b.prodLoss)||0), 0); // 로스 합산
+         const totalLoss = filteredProduction.reduce((a,b) => a + (parseFloat(b.dripLoss)||0) + (parseFloat(b.scrapLoss)||parseFloat(b.trimLoss)||0) + (parseFloat(b.wasteLoss)||parseFloat(b.prodLoss)||0), 0);
          return { totalInbound, totalProduction, totalLoss };
        }, [filteredItems, filteredProduction]);
 
@@ -1534,14 +2033,17 @@
          const g = {};
          dataSrc.forEach(i => {
             if (typeFilter && i.initialType !== typeFilter && !i.cutType) return;
-            const k = i[key] || "미지정"; if(!g[k]) g[k] = 0; g[k] += parseFloat(i.weight) || 0;
+            const k = i[key] || "미지정"; if(!g[k]) g[k] = 0;
+            g[k] += (typeFilter === "INBOUND") ? getOriginalInboundWeight(i) : (parseFloat(i.weight) || 0);
          });
          return Object.entries(g).map(([name, value]) => ({name, value})).sort((a,b)=>b.value-a.value).slice(0,5);
        };
 
        const handleStatsBriefing = async () => {
-          if(filteredItems.length === 0 && filteredProduction.length === 0) return alert("분석할 데이터가 없습니다.");
-          setIsBriefingOpen(true); setBriefingText("AI 분석중...");
+          if(filteredItems.length === 0 && filteredProduction.length === 0) return;
+          setIsBriefingOpen(true);
+          setBriefingTitle("✨ 경영 분석 리포트");
+          setBriefingText("AI 분석중...");
 
           const topProducts = chartData('productName').map(d => `${d.name}(${d.value.toFixed(1)}kg)`).join(", ");
           const topProdProducts = chartData('productName', filteredProduction, null).map(d => `${d.name}(${d.value.toFixed(1)}kg)`).join(", ");
@@ -1554,13 +2056,52 @@
           const text = await callGeminiText(prompt); setBriefingText(text);
        };
 
+       const handlePurchaseAnalysis = async () => {
+           setIsBriefingOpen(true);
+           setBriefingTitle("🛒 AI 원육 발주 제안");
+           setBriefingText("AI가 현재 가용 재고와 기간 내 소진율을 기반으로 발주량을 산출하고 있습니다...");
+
+           const currentStockList = inventory.filter(i => i.status === "ACTIVE");
+           const currentStockMap = {};
+           currentStockList.forEach(i => {
+               const p = i.productName || "기타";
+               currentStockMap[p] = (currentStockMap[p] || 0) + (parseFloat(i.weight) || 0);
+           });
+
+           const prodMap = {};
+           filteredProduction.forEach(p => {
+               const name = p.productName || "기타";
+               prodMap[name] = (prodMap[name] || 0) + (parseFloat(p.totalDeduction) || parseFloat(p.weight) || 0);
+           });
+
+           const stockStr = Object.entries(currentStockMap).map(([k, v]) => `${k}:${v.toFixed(1)}kg`).join(", ") || "재고없음";
+           const prodStr = Object.entries(prodMap).map(([k, v]) => `${k}:${v.toFixed(1)}kg`).join(", ") || "생산내역없음";
+
+           const prompt = `당신은 육류 가공 브랜드의 구매 관리자입니다.
+분석 기간 기준: ${targetLabel}
+현재 시스템 상 가용 재고 현황: ${stockStr}
+해당 기간 내 부위별 총 소진량(순생산+로스 합계): ${prodStr}
+
+위 데이터를 기반으로 다음 세 가지 항목을 분석하여 보고해주세요:
+1. 각 부위별 재고 소진 속도 및 현재 재고 기준 예상 고갈 시점 추정 (재고 회전일수 분석)
+2. 당장 원육 입고(발주)가 시급한 우선순위 품목 3가지
+3. 품목별 적정 권장 발주량 (향후 2주~1달 치 버퍼 물량을 고려하여 구체적인 kg 단위 제안)
+전문적이고 단호한 어조의 평문(마크다운 서식 제외)으로 한국어로 작성해주세요.`;
+
+           const text = await callGeminiText(prompt);
+           setBriefingText(text);
+       };
+
        return (
          <div className="h-full flex flex-col bg-slate-50 p-4 overflow-y-auto pb-safe">
             <div className="flex justify-between items-center mb-6">
                <h2 className="text-xl font-bold text-slate-800">📈 경영 통계</h2>
-               <div className="flex gap-2">
-                  <button onClick={handleStatsBriefing} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-bold text-xs border border-indigo-100 shadow-sm flex items-center gap-1">✨ AI 분석</button>
-                  <div className="bg-slate-200 rounded-lg p-1 flex text-xs font-bold">
+               <div className="flex flex-col gap-2 items-end">
+                  <div className="flex gap-2">
+                     <button onClick={handlePurchaseAnalysis} className="bg-emerald-50 text-emerald-600 px-3 py-1.5 rounded-lg font-bold text-xs border border-emerald-100 shadow-sm flex items-center gap-1">🛒 AI 발주 제안</button>
+                     <button onClick={handleStatsBriefing} className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-bold text-xs border border-indigo-100 shadow-sm flex items-center gap-1">✨ AI 분석</button>
+                  </div>
+                  <div className="bg-slate-200 rounded-lg p-1 flex text-xs font-bold w-fit">
                      <button onClick={()=>setViewMode("MONTH")} className={`px-3 py-1.5 rounded-md ${viewMode==="MONTH"?"bg-white shadow":""}`}>월별</button>
                      <button onClick={()=>setViewMode("YEAR")} className={`px-3 py-1.5 rounded-md ${viewMode==="YEAR"?"bg-white shadow":""}`}>연도별</button>
                   </div>
@@ -1594,7 +2135,7 @@
             {isBriefingOpen && (
                <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
                   <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up">
-                     <h3 className="font-bold text-lg mb-2">✨ 경영 분석 리포트</h3>
+                     <h3 className="font-bold text-lg mb-2">{briefingTitle}</h3>
                      <div className="text-sm text-slate-600 mb-4 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">{briefingText}</div>
                      <button onClick={()=>setIsBriefingOpen(false)} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold">닫기</button>
                   </div>
@@ -1606,25 +2147,77 @@
 
     // --- 4. Settings Screen ---
     function SettingsScreen({ user, masterData, setMasterData }) {
-      const [activeCat, setActiveCat] = useState("locations");
+      const [activeCat, setActiveCat] = useState("lossPresets");
+      const [presetToDelete, setPresetToDelete] = useState(null); // V5.6 버그 수정: 모바일용 커스텀 삭제 모달 상태
+      const [feedback, setFeedback] = useState(null);
+
       const CATS = [
+        {k:"lossPresets", n:"로스 프리셋"},
         {k:"locations", n:"위치"}, {k:"productNames", n:"부위명"}, {k:"cutTypes", n:"컷팅형태"},
         {k:"factories", n:"공장번호"}, {k:"brands", n:"브랜드"}, {k:"grades", n:"등급"},
         {k:"origins", n:"원산지"}, {k:"suppliers", n:"거래처"}, {k:"returnDestinations", n:"반품처"}
       ];
 
       const [apiKeyInput, setApiKeyInput] = useState("");
+      const [presetForm, setPresetForm] = useState({ productName: "", cutType: "", dripLoss: "", scrapLoss: "", wasteLoss: "" });
+
       useEffect(() => { setApiKeyInput(localStorage.getItem("meat_wms_api_key") || ""); }, []);
-      const saveApiKey = () => { localStorage.setItem("meat_wms_api_key", apiKeyInput.trim()); alert("API 키가 저장되었습니다."); };
+      const saveApiKey = () => { localStorage.setItem("meat_wms_api_key", apiKeyInput.trim()); setFeedback({type:"success", msg:"API 키가 저장되었습니다."}); setTimeout(()=>setFeedback(null),2000); };
+
       const updateMaster = async (newData) => {
           setMasterData(newData); const { db, doc, setDoc } = window.__fb; const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
           await setDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data"), newData, {merge:true});
       };
+
       const addVal = (val) => { if(!val) return; const list = masterData[activeCat] || []; if(!list.includes(val)) updateMaster({...masterData, [activeCat]: [...list, val]}); };
       const delVal = (val) => { const list = masterData[activeCat] || []; updateMaster({...masterData, [activeCat]: list.filter(v=>v!==val)}); };
 
+      // 로스 프리셋 전용 로직
+      const handleSavePreset = () => {
+          if (!presetForm.productName || !presetForm.cutType) {
+              setFeedback({type:"error", msg:"부위명과 컷팅형태를 선택해주세요."});
+              setTimeout(()=>setFeedback(null),2500);
+              return;
+          }
+
+          const list = masterData.lossPresets || [];
+          const index = list.findIndex(p => p.productName === presetForm.productName && p.cutType === presetForm.cutType);
+
+          // V5.6 버그 수정: 문자열을 숫자로 변환하여 저장
+          const newPreset = {
+              productName: presetForm.productName,
+              cutType: presetForm.cutType,
+              dripLoss: presetForm.dripLoss !== "" ? parseFloat(presetForm.dripLoss) : 0,
+              scrapLoss: presetForm.scrapLoss !== "" ? parseFloat(presetForm.scrapLoss) : 0,
+              wasteLoss: presetForm.wasteLoss !== "" ? parseFloat(presetForm.wasteLoss) : 0,
+          };
+
+          let newList = [...list];
+          if (index >= 0) newList[index] = newPreset;
+          else newList.push(newPreset);
+
+          updateMaster({ ...masterData, lossPresets: newList });
+          setPresetForm({ productName: "", cutType: "", dripLoss: "", scrapLoss: "", wasteLoss: "" });
+      };
+
+      const executeDelPreset = () => {
+          if(!presetToDelete) return;
+          const list = masterData.lossPresets || [];
+          updateMaster({ ...masterData, lossPresets: list.filter(p => !(p.productName === presetToDelete.productName && p.cutType === presetToDelete.cutType)) });
+          setPresetToDelete(null);
+      };
+
       return (
-         <div className="h-full flex flex-col bg-white">
+         <div className="h-full flex flex-col bg-white relative">
+            {feedback && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
+                <div className={`px-8 py-6 rounded-3xl shadow-2xl backdrop-blur-md flex flex-col items-center animate-slide-up ${feedback.type==="error"?"bg-red-500/90":"bg-slate-900/90"} text-white`}>
+                    <span className="text-4xl mb-2">{feedback.type==="success" ? "✅" : "🚨"}</span>
+                    <p className="text-xl font-bold text-center">{feedback.msg}</p>
+                </div>
+                </div>
+            )}
+
             <div className="p-4 bg-slate-100 border-b">
                 <h3 className="font-bold text-sm text-slate-600 mb-2">🔑 Google AI API 키 관리</h3>
                 <div className="flex gap-2">
@@ -1637,16 +2230,100 @@
                   <button key={c.k} onClick={()=>setActiveCat(c.k)} className={`px-4 py-3 text-sm font-bold whitespace-nowrap ${activeCat===c.k ? "text-indigo-600 border-b-2 border-indigo-600 bg-white" : "text-slate-400"}`}>{c.n}</button>
                ))}
             </div>
-            <div className="flex-1 overflow-y-auto p-4 bg-slate-50 pb-safe">
-               {(masterData[activeCat]||[]).map(v => (
-                  <div key={v} className="bg-white p-3 mb-2 rounded-lg border border-slate-200 flex justify-between">
-                      <span className="font-bold">{v}</span><button onClick={()=>delVal(v)} className="text-red-400 font-bold">✕</button>
-                  </div>
-               ))}
-            </div>
-            <div className="p-4 border-t bg-white pb-safe">
-               <AddItem onAdd={addVal} placeholder={`${CATS.find(c=>c.k===activeCat).n} 추가`} />
-            </div>
+
+            {/* V5.6: 로스 프리셋 UI */}
+            {activeCat === "lossPresets" ? (
+                <div className="flex-1 overflow-y-auto p-4 bg-slate-50 pb-safe flex flex-col gap-4">
+                    <div className="bg-white p-4 rounded-xl border border-indigo-100 shadow-sm flex flex-col gap-3">
+                        <h4 className="font-bold text-indigo-800">새 프리셋 등록/수정</h4>
+                        <div className="flex gap-2">
+                            <div className="flex-1">
+                                <span className="text-[10px] font-bold text-slate-400">부위명</span>
+                                <select value={presetForm.productName} onChange={e=>setPresetForm({...presetForm, productName:e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-sm font-bold outline-none">
+                                    <option value="">선택</option>
+                                    {masterData.productNames.map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                            </div>
+                            <div className="flex-1">
+                                <span className="text-[10px] font-bold text-slate-400">컷팅형태</span>
+                                <select value={presetForm.cutType} onChange={e=>setPresetForm({...presetForm, cutType:e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-sm font-bold outline-none">
+                                    <option value="">선택</option>
+                                    {(masterData.cutTypes || []).map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <div className="flex-1">
+                                <span className="text-[10px] font-bold text-slate-400">계량/해동 로스(투입량대비%)</span>
+                                <input type="number" value={presetForm.dripLoss} onChange={e=>setPresetForm({...presetForm, dripLoss:e.target.value})} placeholder="0.0" className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-sm font-bold outline-none" />
+                            </div>
+                            <div className="flex-1">
+                                <span className="text-[10px] font-bold text-slate-400">파지 로스(투입량대비%)</span>
+                                <input type="number" value={presetForm.scrapLoss} onChange={e=>setPresetForm({...presetForm, scrapLoss:e.target.value})} placeholder="0.0" className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-sm font-bold outline-none text-orange-600" />
+                            </div>
+                            <div className="flex-1">
+                                <span className="text-[10px] font-bold text-slate-400">폐기 로스(투입량대비%)</span>
+                                <input type="number" value={presetForm.wasteLoss} onChange={e=>setPresetForm({...presetForm, wasteLoss:e.target.value})} placeholder="0.0" className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1.5 text-sm font-bold outline-none text-red-600" />
+                            </div>
+                        </div>
+                        <button onClick={handleSavePreset} className="w-full py-2 bg-indigo-600 text-white rounded-lg font-bold text-sm shadow mt-1 hover:bg-indigo-700 transition-colors">저장하기</button>
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                        <h4 className="font-bold text-sm text-slate-600 px-1">저장된 프리셋 목록</h4>
+                        {(masterData.lossPresets || []).length === 0 && <div className="text-center py-6 text-slate-400 text-sm">저장된 내역이 없습니다.</div>}
+                        {(masterData.lossPresets || []).map((p, idx) => (
+                            <div key={idx}
+                                 className="bg-white p-3 rounded-xl border border-slate-200 flex justify-between items-center shadow-sm cursor-pointer hover:bg-slate-50 transition-colors"
+                                 onClick={() => setPresetForm({ // V5.6 버그 수정: 클릭 시 폼에 자동 채워넣어 UX 개선
+                                    productName: p.productName,
+                                    cutType: p.cutType,
+                                    dripLoss: p.dripLoss !== undefined ? String(p.dripLoss) : "",
+                                    scrapLoss: p.scrapLoss !== undefined ? String(p.scrapLoss) : "",
+                                    wasteLoss: p.wasteLoss !== undefined ? String(p.wasteLoss) : ""
+                                 })}>
+                                <div>
+                                    <div className="font-bold text-slate-800 text-sm">{p.productName} <span className="text-indigo-600 text-xs bg-indigo-50 px-1 py-0.5 rounded">{p.cutType}</span></div>
+                                    <div className="text-xs text-slate-500 mt-1 flex gap-2">
+                                        <span>해동: {p.dripLoss || 0}%</span>
+                                        <span className="text-orange-500">파지: {p.scrapLoss || 0}%</span>
+                                        <span className="text-red-500">폐기: {p.wasteLoss || 0}%</span>
+                                    </div>
+                                </div>
+                                <button onClick={(e)=>{ e.stopPropagation(); setPresetToDelete({productName: p.productName, cutType: p.cutType}); }} className="bg-red-50 text-red-500 px-2 py-1 rounded text-xs font-bold hover:bg-red-100 transition-colors">삭제</button>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* V5.6 버그 수정: confirm 대체용 안전한 삭제 모달 */}
+                    {presetToDelete && (
+                        <div className="fixed inset-0 z-[99] bg-black/60 flex items-center justify-center p-4 animate-pulse-red">
+                            <div className="bg-white w-full max-w-xs rounded-2xl p-6 shadow-2xl animate-fade-in text-center">
+                            <div className="text-4xl mb-4">🗑</div>
+                            <h3 className="font-bold text-lg text-slate-800 mb-2">프리셋을 삭제하시겠습니까?</h3>
+                            <p className="text-sm text-slate-500 mb-6">[{presetToDelete.productName} - {presetToDelete.cutType}]</p>
+                            <div className="flex gap-3">
+                                <button onClick={()=>setPresetToDelete(null)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold text-slate-600">취소</button>
+                                <button onClick={executeDelPreset} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-bold shadow-lg shadow-red-200">삭제하기</button>
+                            </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            ) : (
+                <>
+                    <div className="flex-1 overflow-y-auto p-4 bg-slate-50 pb-safe">
+                        {(masterData[activeCat]||[]).map(v => (
+                        <div key={v} className="bg-white p-3 mb-2 rounded-lg border border-slate-200 flex justify-between">
+                            <span className="font-bold">{v}</span><button onClick={()=>delVal(v)} className="text-red-400 font-bold">✕</button>
+                        </div>
+                        ))}
+                    </div>
+                    <div className="p-4 border-t bg-white pb-safe">
+                        <AddItem onAdd={addVal} placeholder={`${CATS.find(c=>c.k===activeCat).n} 추가`} />
+                    </div>
+                </>
+            )}
          </div>
       );
     }
@@ -1661,7 +2338,7 @@
                 <div className="space-y-3">
                    <div className="grid grid-cols-2 gap-3">
                       <Select label="부위명" val={form.productName} opt={masterData.productNames} onChange={v=>setForm({...form, productName:v})} />
-                      <Input label="중량(kg)" type="number" val={form.weight} onChange={v=>setForm({...form, weight:parseFloat(v)})} />
+                      <Input label="중량(kg)" type="number" val={form.weight} onChange={v=>setForm({...form, weight:(parseFloat(v) || 0)})} />
                    </div>
                    <div className="grid grid-cols-2 gap-3">
                       <Select label="브랜드" val={form.brand} opt={masterData.brands} onChange={v=>setForm({...form, brand:v})} />
@@ -1673,7 +2350,7 @@
                    </div>
                    <div className="grid grid-cols-2 gap-3">
                       <Select label="위치" val={form.location} opt={masterData.locations} onChange={v=>setForm({...form, location:v})} />
-                      <Input label="패킹일자" type="date" val={form.packingDate} onChange={v=>setForm({...form, packingDate:v})} />
+                      <Input label="제조일자" type="date" val={form.packingDate} onChange={v=>setForm({...form, packingDate:v})} />
                    </div>
                    <div className="grid grid-cols-2 gap-3">
                       <Select label="거래처" val={form.supplier} opt={masterData.suppliers} onChange={v=>setForm({...form, supplier:v})} />
