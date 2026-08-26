@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>원육 매니저 V6.0 (Stability & UX)</title>
+    <title>원육 매니저 V6.1 (Audit Hotfix)</title>
 
     <!-- Tailwind CSS (버전 고정: 갑작스러운 최신버전 변경으로 인한 깨짐 방지) -->
     <script src="https://cdn.tailwindcss.com/3.4.16"></script>
@@ -130,7 +130,8 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import {
-            getFirestore, collection, addDoc, onSnapshot, serverTimestamp, deleteDoc, doc, setDoc, writeBatch, updateDoc, query, where, getDocs, orderBy, limit, arrayUnion
+            getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+            collection, addDoc, onSnapshot, serverTimestamp, deleteDoc, doc, setDoc, writeBatch, updateDoc, query, where, getDocs, orderBy, limit, arrayUnion
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
@@ -144,7 +145,13 @@
 
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
-        const db = getFirestore(app);
+        // 오프라인 지속성 캐시: 네트워크 끊긴 상태에서 등록한 건이 탭 종료 후에도 보존되어 재접속 시 서버로 전송됨
+        let db;
+        try {
+            db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+        } catch (e) {
+            db = getFirestore(app); // 프라이빗 모드 등 IndexedDB 불가 환경 폴백
+        }
 
         window.__fb = {
             auth, db, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
@@ -189,15 +196,23 @@
       const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().split('T')[0];
     }
 
+    // Date/ISO 문자열 → 로컬(KST) 기준 'YYYY-MM-DD' (toISOString 직접 사용 시 새벽 기록이 전날로 귀속됨)
+    function toLocalDateStr(v) {
+        const d = v instanceof Date ? new Date(v) : new Date(String(v));
+        if (isNaN(d.getTime())) return String(v).substring(0, 10);
+        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+        return d.toISOString().substring(0, 10);
+    }
+
     function getSafeDate(item, field) {
         const val = item[field];
         if (!val) {
             if (item.processDate) return item.processDate.substring(0, 10);
-            if (item.timestamp && item.timestamp.seconds) return new Date(item.timestamp.seconds * 1000).toISOString().substring(0,10);
+            if (item.timestamp && item.timestamp.seconds) return toLocalDateStr(new Date(item.timestamp.seconds * 1000));
             return getTodayString();
         }
         if (typeof val === 'string') return val.substring(0, 10);
-        if (val.seconds) return new Date(val.seconds * 1000).toISOString().substring(0, 10);
+        if (val.seconds) return toLocalDateStr(new Date(val.seconds * 1000));
         return getTodayString();
     }
 
@@ -299,13 +314,21 @@
         return "";
     }
 
+    // 'YYYY-MM-DD'를 로컬(KST) 자정으로 파싱. new Date('YYYY-MM-DD')는 UTC 자정(=KST 09:00)이라 D-day가 하루 늦게 계산됨
+    function parseLocalDate(s) {
+        if (!s) return null;
+        const p = String(s).substring(0,10).split('-');
+        if (p.length !== 3) return null;
+        const d = new Date(parseInt(p[0],10), parseInt(p[1],10)-1, parseInt(p[2],10));
+        return isNaN(d.getTime()) ? null : d;
+    }
+
     function getDDayString(expDateStr, storageType) {
         if(!expDateStr) return { text: "", status: 'normal' };
         const today = new Date(); today.setHours(0,0,0,0);
-        const exp = new Date(expDateStr);
-        if (isNaN(exp.getTime())) return { text: "(날짜 오류)", status: 'normal' };
-        const diffTime = exp - today;
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        const exp = parseLocalDate(expDateStr);
+        if (!exp) return { text: "(날짜 오류)", status: 'normal' };
+        const diffDays = Math.round((exp - today) / (1000 * 60 * 60 * 24));
         const warningThreshold = storageType === "냉장" ? 15 : 90;
         if (diffDays < 0) return { text: `(만료! ${Math.abs(diffDays)}일 지남)`, status: 'expired' };
         if (diffDays === 0) return { text: "(오늘 만료)", status: 'expired' };
@@ -315,13 +338,21 @@
 
     function checkExpirationWarning(expDateStr, storageType) {
         if(!expDateStr) return false;
-        const today = new Date();
-        const exp = new Date(expDateStr);
-        if (isNaN(exp.getTime())) return false;
-        const diffTime = exp - today;
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        const today = new Date(); today.setHours(0,0,0,0);
+        const exp = parseLocalDate(expDateStr);
+        if (!exp) return false;
+        const diffDays = Math.round((exp - today) / (1000 * 60 * 60 * 24));
         const warningThreshold = storageType === "냉장" ? 15 : 90;
         return diffDays <= warningThreshold;
+    }
+
+    // 쓰기 Promise는 오프라인이면 서버 ack까지 pending 상태로 남음(지속성 캐시가 큐 보존).
+    // 일정 시간 내 ack가 없으면 '큐 저장됨'으로 간주해 UI를 진행시킴
+    function commitWithTimeout(promise, ms = 5000) {
+        return Promise.race([
+            promise.then(() => "ok"),
+            new Promise(resolve => setTimeout(() => resolve("queued"), ms))
+        ]);
     }
 
     function cleanPayload(obj) {
@@ -466,22 +497,24 @@ Use an empty string "" for any field you cannot read.` },
                returnDestination: prev.returnDestination || mergedData.returnDestinations?.[0] || "",
                storageType: prev.storageType || mergedData.storageTypes?.[0] || "냉장"
              }));
-          } else {
-             setDoc(configRef, DEFAULT_MASTER_DATA);
+          } else if (!snap.metadata.fromCache) {
+             // 서버가 '문서 없음'을 실제로 확인한 경우에만 최초 1회 시딩.
+             // 캐시 기준 '없음' 스냅샷(오프라인/빈 캐시)에 시딩하면 실제 설정을 기본값으로 덮어씀 (2026-08-19 사고 원인)
+             setDoc(configRef, DEFAULT_MASTER_DATA, { merge: true });
           }
-        });
+        }, (err) => console.error("설정 동기화 오류:", err));
 
         const logsRef = collection(db, "artifacts", appId, "public", "data", "meat_wms_logs");
         const unsubLogs = onSnapshot(logsRef, (snapshot) => {
           const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
           setInventory(items.sort((a,b) => (b.clientTimestamp || "").localeCompare(a.clientTimestamp || "")));
-        });
+        }, (err) => console.error("재고 동기화 오류:", err));
 
         const prodLogsRef = collection(db, "artifacts", appId, "public", "data", "meat_production_logs");
         const unsubProdLogs = onSnapshot(prodLogsRef, (snapshot) => {
             const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
             setProductionLogs(items.sort((a,b) => (b.processDate || "").localeCompare(a.processDate || "")));
-        });
+        }, (err) => console.error("생산 로그 동기화 오류:", err));
 
         return () => { unsubConfig(); unsubLogs(); unsubProdLogs(); };
       }, [user]);
@@ -492,7 +525,7 @@ Use an empty string "" for any field you cannot read.` },
             <div className="flex items-center justify-between">
                <div className="flex items-center gap-2">
                   <div className="bg-indigo-600 p-1.5 rounded-lg shadow-sm">
-                     <span className="text-white text-xs font-black">V6.0</span>
+                     <span className="text-white text-xs font-black">V6.1</span>
                   </div>
                   <h1 className="font-bold text-lg text-slate-800 tracking-tight">원육 매니저</h1>
                </div>
@@ -559,6 +592,7 @@ Use an empty string "" for any field you cannot read.` },
 
         const [prodToDelete, setProdToDelete] = useState(null);
         const [prodToEdit, setProdToEdit] = useState(null);
+        const [isSubmitting, setIsSubmitting] = useState(false); // 더블탭 중복 커밋 방지
 
         const [isBriefingOpen, setIsBriefingOpen] = useState(false);
         const [briefingText, setBriefingText] = useState("");
@@ -667,7 +701,8 @@ Use an empty string "" for any field you cannot read.` },
                 return;
             }
 
-            if (!user) return;
+            if (!user || isSubmitting) return;
+            setIsSubmitting(true);
             const { db, writeBatch, doc, collection, arrayUnion, serverTimestamp } = window.__fb;
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             const batch = writeBatch(db);
@@ -725,11 +760,11 @@ Use an empty string "" for any field you cannot read.` },
                     scrapSaved: saveScrap, scrapTargetName: saveScrap ? derivedScrapName : null, scrapType: saveScrap ? scrapType : null, scrapSpecies: saveScrap ? scrapSpecies : null, targetLocation: targetLocation, usedStocks: usedStocksData, createdScrapId: createdScrapId, timestamp: serverTimestamp()
                 });
 
-                await batch.commit();
+                const commitState = await commitWithTimeout(batch.commit());
 
                 setPackWeight(""); setPackCount("");
                 if (isScrapEligible) setSaveScrap(true);
-                setFeedback({ type: "success", msg: "생산 등록 및 재고 차감 완료!" });
+                setFeedback({ type: "success", msg: commitState === "queued" ? "오프라인 저장됨 — 연결되면 자동 전송됩니다" : "생산 등록 및 재고 차감 완료!" });
                 playSound("success");
                 setTimeout(() => setFeedback(null), 2000);
 
@@ -737,6 +772,8 @@ Use an empty string "" for any field you cannot read.` },
                 console.error("Batch Transaction Error:", e);
                 setFeedback({ type: "error", msg: "처리 중 오류 발생: " + e.message });
                 playSound("error");
+            } finally {
+                setIsSubmitting(false);
             }
         };
 
@@ -765,11 +802,12 @@ ${summary}
         };
 
         const executeDeleteProd = async () => {
-            if (!prodToDelete) return;
+            if (!prodToDelete || isSubmitting) return;
             if (prodToDelete.usedStocks && prodToDelete.usedStocks.length > 400) {
                 setFeedback({ type: "error", msg: "복구 대상 재고가 400개를 초과하여 오류가 발생할 수 있습니다." });
                 return;
             }
+            setIsSubmitting(true);
 
             const { db, writeBatch, doc, arrayUnion } = window.__fb;
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -801,7 +839,7 @@ ${summary}
                 const prodLogRef = doc(db, "artifacts", appId, "public", "data", "meat_production_logs", prodToDelete.id);
                 batch.delete(prodLogRef);
 
-                await batch.commit();
+                await commitWithTimeout(batch.commit());
                 setProdToDelete(null);
 
                 if (missingStockWarning) {
@@ -815,15 +853,18 @@ ${summary}
                 }
             } catch(e) {
                 setFeedback({ type: "error", msg: "삭제 오류: " + e.message });
+            } finally {
+                setIsSubmitting(false);
             }
         };
 
         const executeEditProd = async () => {
-            if (!prodToEdit) return;
+            if (!prodToEdit || isSubmitting) return;
             if (prodToEdit.usedStocks && prodToEdit.usedStocks.length > 400) {
                 setFeedback({ type: "error", msg: "복구 대상 재고가 400개를 초과하여 오류가 발생할 수 있습니다." });
                 return;
             }
+            setIsSubmitting(true);
 
             const { db, writeBatch, doc, arrayUnion } = window.__fb;
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -854,7 +895,7 @@ ${summary}
                 const prodLogRef = doc(db, "artifacts", appId, "public", "data", "meat_production_logs", prodToEdit.id);
                 batch.delete(prodLogRef);
 
-                await batch.commit();
+                await commitWithTimeout(batch.commit());
 
                 // 폼 데이터 채우기
                 setTargetLocation(prodToEdit.targetLocation || "작업장 해동고");
@@ -880,6 +921,8 @@ ${summary}
                 setTimeout(() => setFeedback(null), 3000);
             } catch(e) {
                 setFeedback({ type: "error", msg: "수정 준비 오류: " + e.message });
+            } finally {
+                setIsSubmitting(false);
             }
         };
 
@@ -1031,8 +1074,8 @@ ${summary}
                             </div>
                         </div>
 
-                        <button onClick={handleProductionSubmit} className="mt-1 bg-indigo-600 hover:bg-indigo-700 active:scale-95 transition-transform text-white font-black py-3 rounded-xl shadow-lg shadow-indigo-200 flex justify-center items-center gap-2">
-                            <span>등록 및 차감 실행</span>
+                        <button onClick={handleProductionSubmit} disabled={isSubmitting} className={`mt-1 ${isSubmitting ? "bg-slate-400" : "bg-indigo-600 hover:bg-indigo-700 active:scale-95"} transition-transform text-white font-black py-3 rounded-xl shadow-lg shadow-indigo-200 flex justify-center items-center gap-2`}>
+                            <span>{isSubmitting ? "처리 중..." : "등록 및 차감 실행"}</span>
                         </button>
                     </div>
                 </div>
@@ -1145,41 +1188,43 @@ ${summary}
 
         try {
           const safeData = cleanPayload(data);
+          const targetId = data.id || null; // cleanPayload가 id를 제거하므로 조회용으로 미리 보존
           const currentWorkDate = globalSettings.workDate;
           const nowISO = new Date().toISOString();
 
           if (mode === "INBOUND") {
              const duplicate = safeData.barcode && inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode && i.transactionType !== "RETURN");
-             if(duplicate && !safeData.id) {
+             if(duplicate && !targetId) {
                 setFeedback({ type: "error", msg: "🚨 이미 등록된 바코드입니다!" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return;
              }
-             await addDoc(collection(db, "artifacts", appId, "public", "data", "meat_wms_logs"), {
+             const st = await commitWithTimeout(addDoc(collection(db, "artifacts", appId, "public", "data", "meat_wms_logs"), {
                ...safeData, status: "ACTIVE", initialType: "INBOUND",
                history: [{ type: "INBOUND", date: nowISO, workDate: currentWorkDate, location: safeData.location }],
                clientTimestamp: nowISO, processDate: currentWorkDate, inboundDate: currentWorkDate, inboundAt: nowISO, timestamp: serverTimestamp()
-             });
-             setLastLog(safeData); setFeedback({ type: "success", msg: "입고 등록 완료" }); playSound("success");
+             }));
+             setLastLog(safeData); setFeedback({ type: "success", msg: st === "queued" ? "오프라인 저장됨 (연결 시 자동 전송)" : "입고 등록 완료" }); playSound("success");
           } else if (mode === "MOVE") {
-             let target = safeData.id ? inventory.find(i => i.id === safeData.id) : inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode);
+             // 바코드가 빈 재고(사진 등록·파지)는 빈 문자열끼리 매칭되어 엉뚱한 재고가 잡히므로 바코드가 있을 때만 바코드 조회
+             let target = targetId ? inventory.find(i => i.id === targetId) : (safeData.barcode ? inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode) : null);
              if (target) {
                if (target.location === safeData.location) { setFeedback({ type: "error", msg: "⚠️ 이미 해당 위치에 있습니다." }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return; }
-               await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", target.id), {
+               const st = await commitWithTimeout(updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", target.id), {
                  location: safeData.location, transactionType: "MOVE", lastMovedAt: nowISO, processDate: currentWorkDate, moveDate: currentWorkDate,
                  history: arrayUnion({ type: "MOVE", date: nowISO, workDate: currentWorkDate, from: target.location, to: safeData.location })
-               });
+               }));
                setLastLog({ ...target, location: safeData.location, transactionType: "MOVE", prevLoc: target.location });
-               setFeedback({ type: "success", msg: "이동 완료" }); playSound("success");
+               setFeedback({ type: "success", msg: st === "queued" ? "오프라인 저장됨 (연결 시 자동 전송)" : "이동 완료" }); playSound("success");
              } else { setFeedback({ type: "error", msg: "재고 없음" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return; }
           } else if (mode === "RETURN") {
-             let target = safeData.id ? inventory.find(i => i.id === safeData.id) : inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode);
+             let target = targetId ? inventory.find(i => i.id === targetId) : (safeData.barcode ? inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode) : null);
              if (target) {
                 if (target.status === "RETURNED") { setFeedback({ type: "error", msg: "🚨 이미 반품된 상품입니다." }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return; }
                 const returnDest = safeData.location || "반품";
-                await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", target.id), {
+                const st = await commitWithTimeout(updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", target.id), {
                    location: returnDest, status: "RETURNED", transactionType: "RETURN", returnedAt: nowISO, processDate: currentWorkDate, returnDate: currentWorkDate,
                    history: arrayUnion({ type: "RETURN", date: nowISO, workDate: currentWorkDate, from: target.location, to: returnDest })
-                });
-                setLastLog({ ...target, location: returnDest, transactionType: "RETURN" }); setFeedback({ type: "success", msg: "반품 처리 완료" }); playSound("success");
+                }));
+                setLastLog({ ...target, location: returnDest, transactionType: "RETURN" }); setFeedback({ type: "success", msg: st === "queued" ? "오프라인 저장됨 (연결 시 자동 전송)" : "반품 처리 완료" }); playSound("success");
              } else { setFeedback({ type: "error", msg: "재고 없음" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return; }
           }
           setTimeout(() => setFeedback(null), 1500);
@@ -1267,6 +1312,7 @@ ${summary}
         if (parsed.date && parsed.dateIsExpiry) pDate = getProductionDateFromExpiry(parsed.date, stType) || parsed.date;
 
         const finalData = {
+          id: foundStock?.id, // 이동/반품 대상 정확 지정용 (저장 시에는 cleanPayload가 제거)
           barcode: code, gtin: parsed.gtin,
           productName: globalSettings.productName || foundStock?.productName || "", brand: globalSettings.brand || foundStock?.brand || "",
           origin: globalSettings.origin || parsed.origin || foundStock?.origin || "", storageType: stType,
@@ -1444,7 +1490,8 @@ ${summary}
       const setDateRange = (range) => {
          const end = new Date(); const start = new Date();
          if(range === 'today') { /* no op */ } else if(range === '3d') start.setDate(end.getDate() - 3); else if(range === '7d') start.setDate(end.getDate() - 7); else if(range === 'month') start.setMonth(end.getMonth() - 1); else if(range === 'thisMonth') start.setDate(1);
-         const fmt = d => d.toISOString().split('T')[0];
+         // toISOString()은 UTC라 KST 00:00~08:59에 전날이 나옴 → 로컬 오프셋 보정 (getTodayString과 동일 기준)
+         const fmt = d => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().split('T')[0]; };
          setStartDate(fmt(start)); setEndDate(fmt(end));
       };
 
@@ -1543,7 +1590,15 @@ ${summary}
 
                 payload.history = updatedHistory;
             }
-            await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", updatedData.id), payload);
+            // 모달을 열어둔 사이 다른 기기가 차감/이동했을 수 있으므로 실제 바뀐 필드만 저장 (weight·history 등 미변경 필드 덮어쓰기 방지)
+            if (original) {
+                Object.keys(payload).forEach(k => {
+                    if (JSON.stringify(payload[k]) === JSON.stringify(original[k])) delete payload[k];
+                });
+            }
+            if (Object.keys(payload).length > 0) {
+                await updateDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_logs", updatedData.id), payload);
+            }
             setEditingItem(null);
          } catch(e) { alert("수정 실패: " + e.message); }
       };
@@ -1634,7 +1689,9 @@ ${summary}
       const handleBulkFullUpdate = async () => {
          if (selectedIds.size === 0) return;
          const { db, updateDoc, doc } = window.__fb; const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-         const updates = cleanPayload(bulkForm);
+         // '선택'으로 되돌린(빈 문자열) 필드가 일괄 저장되어 기존 값을 지우는 것 방지
+         const updates = {};
+         Object.entries(cleanPayload(bulkForm)).forEach(([k, v]) => { if (v !== "") updates[k] = v; });
          const promises = Array.from(selectedIds).map(id => {
             const original = logs.find(l => l.id === id); let itemUpdates = { ...updates };
             if (original && original.history && Array.isArray(original.history)) {
@@ -1873,7 +1930,7 @@ ${summary}
                             log.history.map((h, i) => {
                                 const isFirst = i === 0; const isMove = h.type === "MOVE"; const isReturn = h.type === "RETURN";
                                 const isConsume = h.type === "CONSUME" || h.type === "PARTIAL_CONSUME"; const isRestore = h.type === "RESTORE";
-                                const dateStr = h.date ? h.date.substring(0,10) : ""; const timeStr = formatTime(h.date);
+                                const dateStr = h.date ? toLocalDateStr(h.date) : ""; const timeStr = formatTime(h.date);
                                 return (
                                     <div key={i} className="flex items-center gap-2">
                                         <span className={`text-[10px] font-bold w-10 text-center rounded px-1
@@ -2164,13 +2221,15 @@ ${summary}
       useEffect(() => { setApiKeyInput(localStorage.getItem("meat_wms_api_key") || ""); }, []);
       const saveApiKey = () => { localStorage.setItem("meat_wms_api_key", apiKeyInput.trim()); setFeedback({type:"success", msg:"API 키가 저장되었습니다."}); setTimeout(()=>setFeedback(null),2000); };
 
-      const updateMaster = async (newData) => {
+      // changedKey를 주면 해당 카테고리만 저장 — 로컬 상태가 stale일 때 다른 카테고리(다른 기기의 변경분)까지 덮어쓰는 사고 방지
+      const updateMaster = async (newData, changedKey) => {
           setMasterData(newData); const { db, doc, setDoc } = window.__fb; const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-          await setDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data"), newData, {merge:true});
+          const payload = changedKey ? { [changedKey]: newData[changedKey] } : newData;
+          await setDoc(doc(db, "artifacts", appId, "public", "data", "meat_wms_config", "master_data"), payload, {merge:true});
       };
 
-      const addVal = (val) => { if(!val) return; const list = masterData[activeCat] || []; if(!list.includes(val)) updateMaster({...masterData, [activeCat]: [...list, val]}); };
-      const delVal = (val) => { const list = masterData[activeCat] || []; updateMaster({...masterData, [activeCat]: list.filter(v=>v!==val)}); };
+      const addVal = (val) => { val = String(val || "").trim(); if(!val) return; const list = masterData[activeCat] || []; if(!list.includes(val)) updateMaster({...masterData, [activeCat]: [...list, val]}, activeCat); };
+      const delVal = (val) => { const list = masterData[activeCat] || []; updateMaster({...masterData, [activeCat]: list.filter(v=>v!==val)}, activeCat); };
 
       // 로스 프리셋 전용 로직
       const handleSavePreset = () => {
@@ -2196,14 +2255,14 @@ ${summary}
           if (index >= 0) newList[index] = newPreset;
           else newList.push(newPreset);
 
-          updateMaster({ ...masterData, lossPresets: newList });
+          updateMaster({ ...masterData, lossPresets: newList }, 'lossPresets');
           setPresetForm({ productName: "", cutType: "", dripLoss: "", scrapLoss: "", wasteLoss: "" });
       };
 
       const executeDelPreset = () => {
           if(!presetToDelete) return;
           const list = masterData.lossPresets || [];
-          updateMaster({ ...masterData, lossPresets: list.filter(p => !(p.productName === presetToDelete.productName && p.cutType === presetToDelete.cutType)) });
+          updateMaster({ ...masterData, lossPresets: list.filter(p => !(p.productName === presetToDelete.productName && p.cutType === presetToDelete.cutType)) }, 'lossPresets');
           setPresetToDelete(null);
       };
 
