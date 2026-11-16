@@ -1194,7 +1194,8 @@ ${summary}
 
           if (mode === "INBOUND") {
              const duplicate = safeData.barcode && inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode && i.transactionType !== "RETURN");
-             if(duplicate && !targetId) {
+             // 입고는 항상 신규 등록이므로 targetId 여부와 무관하게 중복 검사 (스캔 시 중복이면 foundStock.id가 실려 오므로 targetId로 건너뛰면 안 됨)
+             if(duplicate) {
                 setFeedback({ type: "error", msg: "🚨 이미 등록된 바코드입니다!" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return;
              }
              const st = await commitWithTimeout(addDoc(collection(db, "artifacts", appId, "public", "data", "meat_wms_logs"), {
