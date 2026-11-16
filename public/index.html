@@ -355,6 +355,12 @@
         ]);
     }
 
+    // 중복 비교용 바코드 정규화: AIM 식별자(]C1 등)·제어문자(FNC1/GS 등)·공백·괄호 제거.
+    // 스캐너/입력 방식에 따라 같은 라벨이 다른 문자열로 들어와 중복 검사를 빠져나가는 것을 방지 (저장값은 원문 유지)
+    function normBarcode(b) {
+      return String(b || "").trim().replace(/^\][A-Za-z]\d/, "").replace(/[\x00-\x1f\x7f\s()]/g, "");
+    }
+
     function cleanPayload(obj) {
       const newObj = {};
       Object.keys(obj).forEach(key => { if (obj[key] !== undefined && obj[key] !== null && key !== 'id') { newObj[key] = obj[key]; } });
@@ -1180,6 +1186,7 @@ ${summary}
       const [modalData, setModalData] = useState({});
       const inputRef = useRef(null);
       const fileInputRef = useRef(null);
+      const recentInboundRef = useRef(new Set());
 
       const commitTransaction = async (data) => {
         if (!user) return;
@@ -1193,11 +1200,14 @@ ${summary}
           const nowISO = new Date().toISOString();
 
           if (mode === "INBOUND") {
-             const duplicate = safeData.barcode && inventory.find(i => i.status === "ACTIVE" && i.barcode === safeData.barcode && i.transactionType !== "RETURN");
+             const nb = normBarcode(safeData.barcode);
+             const duplicate = nb && inventory.find(i => i.status === "ACTIVE" && normBarcode(i.barcode) === nb && i.transactionType !== "RETURN");
              // 입고는 항상 신규 등록이므로 targetId 여부와 무관하게 중복 검사 (스캔 시 중복이면 foundStock.id가 실려 오므로 targetId로 건너뛰면 안 됨)
-             if(duplicate) {
+             // recentInboundRef: 저장 직후 재고 목록(onSnapshot)이 화면에 반영되기 전에 같은 라벨이 다시 찍히는 경우(더블 트리거·연타) 차단
+             if(duplicate || (nb && recentInboundRef.current.has(nb))) {
                 setFeedback({ type: "error", msg: "🚨 이미 등록된 바코드입니다!" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return;
              }
+             if (nb) { recentInboundRef.current.add(nb); setTimeout(() => recentInboundRef.current.delete(nb), 10000); }
              const st = await commitWithTimeout(addDoc(collection(db, "artifacts", appId, "public", "data", "meat_wms_logs"), {
                ...safeData, status: "ACTIVE", initialType: "INBOUND",
                history: [{ type: "INBOUND", date: nowISO, workDate: currentWorkDate, location: safeData.location }],
@@ -1229,7 +1239,7 @@ ${summary}
              } else { setFeedback({ type: "error", msg: "재고 없음" }); playSound("error"); setTimeout(() => setFeedback(null), 3000); return; }
           }
           setTimeout(() => setFeedback(null), 1500);
-        } catch(e) { console.error(e); setFeedback({type:"error", msg: "오류: " + e.message}); playSound("error"); }
+        } catch(e) { recentInboundRef.current.delete(normBarcode(data.barcode)); console.error(e); setFeedback({type:"error", msg: "오류: " + e.message}); playSound("error"); }
       };
 
       // 바코드 파서: (a) GS1-128 AI 파싱, (b) 국내산 농협 고정형(23자리), (c) 순수 GTIN
